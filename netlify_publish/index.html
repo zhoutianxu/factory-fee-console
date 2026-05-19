@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工厂加工费管理平台 Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #202124;
+      --muted: #5f6368;
+      --line: #d7dce2;
+      --panel: #fff;
+      --band: #f4f7f9;
+      --accent: #166534;
+      --accent-dark: #14532d;
+      --header: #19332d;
+      --soft: #edf3f0;
+      --warn: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--band);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    header { background: var(--header); color: #fff; border-bottom: 1px solid #10231e; }
+    .header-inner, main { width: min(1680px, calc(100vw - 36px)); margin: 0 auto; }
+    .header-inner { display: flex; align-items: center; justify-content: space-between; min-height: 66px; gap: 22px; }
+    .brand { display: grid; gap: 2px; font-size: 20px; font-weight: 800; white-space: nowrap; }
+    .brand small { font-size: 12px; font-weight: 500; color: #c7d8d1; }
+    nav { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    nav button {
+      border: 0;
+      color: #dfe9e4;
+      background: transparent;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    nav button.active, nav button:hover { background: rgba(255,255,255,.14); color: #fff; }
+    main { padding: 24px 0 44px; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    h2 { font-size: 18px; margin: 0 0 14px; }
+    h3 { font-size: 16px; margin: 0 0 10px; }
+    p { color: var(--muted); margin: 0; line-height: 1.55; }
+    .notice, .panel, .metric, .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .notice { padding: 12px 14px; margin-bottom: 14px; border-color: #9dd4ad; background: #effaf2; color: #24513a; }
+    .panel { padding: 18px; margin-top: 16px; overflow: hidden; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 16px; }
+    .metric, .card { padding: 16px; }
+    .metric strong { display: block; font-size: 28px; margin-top: 6px; }
+    .form-row { display: grid; grid-template-columns: minmax(110px, 170px) minmax(0, 1fr); gap: 12px; align-items: center; margin: 12px 0; }
+    label { color: #3c4043; font-weight: 650; }
+    select, input[type=text] {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #b8c2cc;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--ink);
+    }
+    button, .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button.secondary, .button.secondary { background: white; color: var(--accent); }
+    .actions, .button-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+    .muted { color: var(--muted); }
+    .hidden { display: none !important; }
+    .demo-page { display: none; }
+    .demo-page.active { display: block; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; max-height: min(66vh, 680px); margin-top: 12px; }
+    table { width: max-content; min-width: 100%; border-collapse: collapse; table-layout: auto; }
+    th, td { border-bottom: 1px solid #e5e9ee; padding: 9px 10px; text-align: left; vertical-align: top; line-height: 1.35; white-space: nowrap; }
+    th { background: var(--soft); color: #33413c; font-weight: 800; position: sticky; top: 0; }
+    td { max-width: 460px; overflow: hidden; text-overflow: ellipsis; }
+    .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-top: 12px; }
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .check-item input { width: 16px; height: 16px; }
+    .workspace { display: grid; grid-template-columns: 260px 320px minmax(640px, 1fr); gap: 14px; align-items: start; overflow-x: auto; padding-bottom: 10px; }
+    .column { min-height: 520px; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; overflow: auto; }
+    .list { display: grid; gap: 8px; }
+    .item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 700;
+    }
+    .item.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .item small { display: block; margin-top: 5px; color: var(--muted); font-weight: 500; line-height: 1.35; }
+    .flow-board { display: grid; gap: 14px; }
+    .flow-top, .flow-middle > section, .flow-bottom { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; overflow: hidden; }
+    .flow-middle { display: grid; grid-template-columns: minmax(260px, 360px) minmax(0, 1fr); gap: 14px; align-items: stretch; }
+    .flow-diagram { display: flex; align-items: stretch; gap: 0; min-width: max-content; padding: 8px 4px 18px; }
+    .flow-scroll { overflow-x: auto; padding-bottom: 8px; }
+    .node { width: 240px; flex: 0 0 240px; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 14px; }
+    .node.source { border-color: #9fb7aa; background: #f4faf6; }
+    .node strong, .node span { display: block; }
+    .node span { color: var(--muted); line-height: 1.45; margin-top: 4px; white-space: normal; }
+    .arrow { flex: 0 0 58px; display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 24px; font-weight: 900; }
+    .step-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-top: 12px; background: #fff; }
+    .status-ok { color: var(--accent); font-weight: 800; }
+    .toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; padding: 12px 14px; border-radius: 8px; background: #effaf2; border: 1px solid #9dd4ad; color: #24513a; box-shadow: 0 8px 30px rgba(0,0,0,.12); }
+    @media (max-width: 920px) {
+      .header-inner { flex-direction: column; align-items: flex-start; padding: 14px 0; }
+      nav { justify-content: flex-start; }
+      .form-row, .flow-middle { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 240px 280px minmax(580px, 1fr); }
+      main { width: min(100vw - 20px, 1680px); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand">工厂加工费管理平台<small>云端交互 Demo，假数据演示</small></div>
+      <nav id="nav"></nav>
+    </div>
+  </header>
+  <main>
+    <div class="notice">这是可点击的云端 Demo：所有数据均为内置样例，不上传真实文件、不执行真实计算、不保存真实业务数据。</div>
+
+    <section class="demo-page active" data-page="sap">
+      <h1>事实表管理</h1>
+      <p>模拟导入 SAP 月度加工费流水，生成 SAP 导入批次，并查看导入数据。</p>
+      <section class="panel">
+        <h2>导入 SAP 流水</h2>
+        <div class="form-row"><label>SAP 文件</label><input type="text" value="SAP_202503_加工费流水.xlsx" readonly></div>
+        <div class="actions"><button id="mockImport">模拟导入数据库</button></div>
+      </section>
+      <section class="panel">
+        <h2>已导入批次</h2>
+        <div class="table-wrap"><table id="sapBatches"></table></div>
+      </section>
+      <section class="panel">
+        <h2>数据预览</h2>
+        <p id="sapPreviewText"></p>
+        <div class="table-wrap"><table id="sapPreview"></table></div>
+      </section>
+    </section>
+
+    <section class="demo-page" data-page="tables">
+      <h1>配置表管理</h1>
+      <p>管理配置表类型和配置表版本。这里模拟表2、表3、表4、表5的版本库。</p>
+      <div class="workspace">
+        <aside class="column">
+          <h2>配置表类型</h2>
+          <div class="list" id="ruleTypeList"></div>
+          <div class="button-row"><button class="secondary" id="moveRule">上移</button><button class="secondary" id="addRuleType">新增类型</button></div>
+        </aside>
+        <aside class="column">
+          <h2>配置表版本</h2>
+          <p id="ruleVersionTitle"></p>
+          <div class="list" id="ruleVersionList"></div>
+          <div class="panel" style="box-shadow:none">
+            <h3>新增配置表版本</h3>
+            <div class="form-row" style="grid-template-columns:1fr"><input type="text" id="newVersionName" placeholder="例如 202503 调整版"></div>
+            <button id="addRuleVersion">新增配置表版本</button>
+          </div>
+        </aside>
+        <section class="column">
+          <h2 id="ruleDetailTitle">数据详情</h2>
+          <div class="grid">
+            <div class="card"><strong>版本状态</strong><p id="ruleStatus"></p></div>
+            <div class="card"><strong>创建人</strong><p>admin</p></div>
+            <div class="card"><strong>总行数</strong><p id="ruleRows"></p></div>
+          </div>
+          <div class="actions"><button class="secondary" id="toggleRuleStatus">停用版本</button><button class="secondary">下载当前版本</button></div>
+          <div class="table-wrap"><table id="rulePreview"></table></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="demo-page" data-page="flows">
+      <h1>计算流程设置</h1>
+      <p>流程只定义步骤、匹配字段和输出字段，运行时再选择具体配置表版本。</p>
+      <section class="flow-board">
+        <section class="flow-top">
+          <div class="button-row" style="margin-top:0">
+            <strong>流程选择</strong>
+            <select id="flowSelect"></select>
+            <button id="addFlow">新增流程</button>
+            <button class="secondary" id="deleteFlow">删除流程</button>
+            <button id="saveFlow">保存流程配置</button>
+          </div>
+        </section>
+        <div class="flow-middle">
+          <section><div class="button-row" style="margin-top:0"><h2 style="margin:0">步骤</h2></div><div class="list" id="flowStepList"></div></section>
+          <section>
+            <div class="button-row" style="margin-top:0"><h2 style="margin:0">流程图</h2><button class="secondary" id="addNode">新增节点</button></div>
+            <p>从 SAP 事实表开始，逐步匹配配置表并输出字段。</p>
+            <div class="flow-scroll"><div class="flow-diagram" id="flowDiagram"></div></div>
+          </section>
+        </div>
+        <section class="flow-bottom">
+          <div class="button-row" style="margin-top:0"><h2 style="margin:0">步骤详情</h2><button id="saveStep">保存步骤</button></div>
+          <div id="stepDetails"></div>
+        </section>
+      </section>
+    </section>
+
+    <section class="demo-page" data-page="run">
+      <h1>执行计算</h1>
+      <p>选择 SAP 批次、计算流程和配置表版本，运行后生成结果。</p>
+      <div class="grid">
+        <div class="metric"><span class="muted">计算结果行</span><strong id="metricResult">54</strong></div>
+        <div class="metric"><span class="muted">异常日志行</span><strong id="metricException">0</strong></div>
+        <div class="metric"><span class="muted">合并结果行</span><strong id="metricMerge">54</strong></div>
+      </div>
+      <section class="panel">
+        <h2>计算任务中心</h2>
+        <div class="form-row"><label>SAP 数据批次</label><select id="runBatch"></select></div>
+        <div class="form-row"><label>计算流程</label><select id="runFlow"></select></div>
+        <div id="versionSelectors"></div>
+        <div class="panel" style="box-shadow:none">
+          <h2>本次计算清单</h2>
+          <div id="runSummary" class="grid"></div>
+        </div>
+        <div class="actions"><button id="runCalc">开始计算</button><button class="secondary" data-go="sap">事实表管理</button><button class="secondary" data-go="tables">维护配置表版本</button></div>
+      </section>
+    </section>
+
+    <section class="demo-page" data-page="results">
+      <h1>计算结果</h1>
+      <p>查看完整回溯明细。这里字段较多，适合复核和追溯。</p>
+      <section class="panel">
+        <h2>选择结果批次</h2>
+        <div class="form-row"><label>合并运行</label><select id="resultRun"></select></div>
+        <div class="actions"><button id="viewResult">查看结果</button><button class="secondary" data-go="run">运行匹配流程</button><button class="secondary" id="deleteResult">删除当前结果</button></div>
+      </section>
+      <section class="panel">
+        <h2>结果概览</h2>
+        <div class="grid">
+          <div class="metric"><span class="muted">输入行数</span><strong>54</strong></div>
+          <div class="metric"><span class="muted">结果行数</span><strong>54</strong></div>
+          <div class="metric"><span class="muted">异常行数</span><strong id="resultException">0</strong></div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>计算结果明细</h2>
+        <div class="table-wrap"><table id="resultTable"></table></div>
+      </section>
+    </section>
+
+    <section class="demo-page" data-page="exports">
+      <h1>加工费导出</h1>
+      <p>勾选给业务用户看的字段，导出预览会同步变化，并生成历史导出记录。</p>
+      <section class="panel">
+        <h2>选择计算结果</h2>
+        <div class="form-row"><label>计算结果批次</label><select id="exportRun"></select></div>
+      </section>
+      <section class="panel">
+        <h2>选择导出字段</h2>
+        <div class="checkbox-grid" id="exportFields"></div>
+        <div class="actions"><button id="createExport">生成导出版本</button><button class="secondary" data-go="results">查看回溯明细</button></div>
+      </section>
+      <section class="panel">
+        <h2>导出预览</h2>
+        <p id="exportPreviewText"></p>
+        <div class="table-wrap"><table id="exportPreview"></table></div>
+      </section>
+      <section class="panel">
+        <h2>导出历史</h2>
+        <div class="table-wrap"><table id="exportHistory"></table></div>
+      </section>
+    </section>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <script>
+    const pages = [
+      ["sap", "1 事实表管理"],
+      ["tables", "2 配置表管理"],
+      ["flows", "3 计算流程设置"],
+      ["run", "4 执行计算"],
+      ["results", "5 计算结果"],
+      ["exports", "6 加工费导出"]
+    ];
+    const sapRows = [
+      {年月:"202503", 工厂代码:"1051", 工厂名称:"重庆工厂", 移动类型:"101", 库位:"L1", 用户名:"u1", 订单号:"1000001723", 物料组:"100", 物料编码:"10056380", 物料描述:"Infinix_X6871.F1_机背膜_PH.256+12_美银", 交货数量:"2.0"},
+      {年月:"202503", 工厂代码:"1051", 工厂名称:"重庆工厂", 移动类型:"101", 库位:"L1", 用户名:"u1", 订单号:"1000001405", 物料组:"100", 物料编码:"10056381", 物料描述:"Infinix_X6871.F1_机中框_EC.256+12_美银", 交货数量:"101.0"},
+      {年月:"202503", 工厂代码:"1051", 工厂名称:"重庆工厂", 移动类型:"101", 库位:"L1", 用户名:"u1", 订单号:"1000001406", 物料组:"100", 物料编码:"10056382", 物料描述:"Infinix_X6871.F1_机中框_EC.256+12_美银", 交货数量:"540.0"},
+      {年月:"202503", 工厂代码:"1051", 工厂名称:"重庆工厂", 移动类型:"101", 库位:"L1", 用户名:"u1", 订单号:"1000001407", 物料组:"100", 物料编码:"10066385", 物料描述:"Infinix_X6860.A1_背盖盖_EC.256+8_美悦", 交货数量:"4.0"}
+    ];
+    const resultRows = sapRows.map((row, index) => ({
+      编码: index + 1,
+      步骤1名称: "匹配物料主数据",
+      步骤1匹配状态: "已匹配",
+      年月: row.年月,
+      工厂代码: row.工厂代码,
+      工厂名称: row.工厂名称,
+      库位: row.库位,
+      移动类型: row.移动类型,
+      用户名: row.用户名,
+      物料编码: row.物料编码,
+      物料描述: row.物料描述,
+      品牌: "Infinix",
+      型号: index < 3 ? "X6871" : "X6860",
+      项目名: index < 3 ? "X6871" : "X6860",
+      工厂机型类别: "整机",
+      工艺分类: "组装",
+      机型类别: "智能机",
+      制式: "5G",
+      交货数量: row.交货数量,
+      标准工时系数: "1.20",
+      综合难度系数: "1.10",
+      单台加工费CNY: "2.56",
+      加工费CNY: (Number(row.交货数量) * 2.56).toFixed(2),
+      匹配状态: "已匹配",
+      命中优先级: index + 1,
+      命中规则行: index + 1
+    }));
+    const state = {
+      page: "sap",
+      batches: [{批次:"SAP_202503_20260518_180005", 年月:"202503", 文件名:"SAP_202503_加工费流水.xlsx", 导入行数:54, 状态:"成功"}],
+      ruleType: "物料主数据",
+      ruleVersion: "物料主数据 v_20260518_175940",
+      exportFields: ["年月","工厂代码","工厂名称","物料编码","物料描述","品牌","机型类别","工艺分类","制式","交货数量"],
+      runs: [{运行ID:"MERGE_s1_20260518_180005", 流程:"标准流程1", SAP批次:"SAP_202503_20260518_180005", 结果行数:54, 异常行数:0, 状态:"成功"}],
+      exports: []
+    };
+    const ruleTables = {
+      "物料主数据": {
+        desc: "物料、机型、项目、工艺等基础归类规则",
+        versions: ["物料主数据 v_20260518_175940", "物料主数据 v_20260518_174802"],
+        rows: resultRows.map(r => ({年月:r.年月, 工厂代码:r.工厂代码, 物料编码:r.物料编码, 物料描述:r.物料描述, 品牌:r.品牌, 型号:r.型号, 工艺分类:r.工艺分类, 制式:r.制式}))
+      },
+      "机型系数": {
+        desc: "标准工时系数、综合难度系数规则",
+        versions: ["机型系数 默认版"],
+        rows: [{年月:"202503", 工厂代码:"1051", 型号:"X6871", 标准工时系数:"1.20", 综合难度系数:"1.10"}, {年月:"202503", 工厂代码:"1051", 型号:"X6860", 标准工时系数:"1.30", 综合难度系数:"1.15"}]
+      },
+      "单台加工费": {
+        desc: "单台加工费、币种、汇率规则",
+        versions: ["单台加工费 默认版"],
+        rows: [{年月:"202503", 工厂代码:"1051", 型号:"X6871", 单台加工费CNY:"2.56"}, {年月:"202503", 工厂代码:"1051", 型号:"X6860", 单台加工费CNY:"2.62"}]
+      },
+      "损益交货量": {
+        desc: "损益交货量是否计入与折算系数规则",
+        versions: ["损益交货量 默认版"],
+        rows: [{年月:"202503", 工厂代码:"1051", 机型类别:"智能机", 是否计入损益交货量:"Y", 损益交货量系数:"1"}]
+      }
+    };
+    const flows = [{name:"标准流程1", steps:[
+      {name:"匹配物料主数据", table:"物料主数据", match:["物料编码"], output:["物料描述","品牌","型号","项目名","工艺分类","制式"]},
+      {name:"匹配机型系数", table:"机型系数", match:["年月","工厂代码","型号"], output:["标准工时系数","综合难度系数"]},
+      {name:"匹配单台加工费", table:"单台加工费", match:["年月","工厂代码","型号"], output:["单台加工费CNY"]}
+    ]}];
+
+    function renderTable(id, rows) {
+      const table = document.getElementById(id);
+      if (!rows.length) { table.innerHTML = "<tbody><tr><td class='muted'>暂无数据</td></tr></tbody>"; return; }
+      const cols = Object.keys(rows[0]);
+      table.innerHTML = "<thead><tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>" +
+        rows.map(r => "<tr>" + cols.map(c => `<td>${r[c] ?? ""}</td>`).join("") + "</tr>").join("") + "</tbody>";
+    }
+    function toast(message) {
+      const el = document.getElementById("toast");
+      el.textContent = message;
+      el.classList.remove("hidden");
+      clearTimeout(window.toastTimer);
+      window.toastTimer = setTimeout(() => el.classList.add("hidden"), 2200);
+    }
+    function go(page) {
+      state.page = page;
+      document.querySelectorAll(".demo-page").forEach(el => el.classList.toggle("active", el.dataset.page === page));
+      document.querySelectorAll("nav button").forEach(btn => btn.classList.toggle("active", btn.dataset.page === page));
+      render();
+    }
+    function renderNav() {
+      const nav = document.getElementById("nav");
+      nav.innerHTML = pages.map(([key, label]) => `<button data-page="${key}" class="${state.page === key ? "active" : ""}">${label}</button>`).join("");
+      nav.querySelectorAll("button").forEach(btn => btn.addEventListener("click", () => go(btn.dataset.page)));
+      document.querySelectorAll("[data-go]").forEach(btn => btn.addEventListener("click", () => go(btn.dataset.go)));
+    }
+    function renderSap() {
+      renderTable("sapBatches", state.batches);
+      document.getElementById("sapPreviewText").textContent = `当前批次：${state.batches[0].批次}，共 54 行，预览前 ${sapRows.length} 行。`;
+      renderTable("sapPreview", sapRows);
+    }
+    function renderTables() {
+      document.getElementById("ruleTypeList").innerHTML = Object.entries(ruleTables).map(([key, meta]) =>
+        `<button class="item ${state.ruleType === key ? "active" : ""}" data-rule="${key}">${key}<small>${meta.desc}</small></button>`).join("");
+      document.querySelectorAll("[data-rule]").forEach(btn => btn.addEventListener("click", () => { state.ruleType = btn.dataset.rule; state.ruleVersion = ruleTables[state.ruleType].versions[0]; renderTables(); }));
+      const meta = ruleTables[state.ruleType];
+      document.getElementById("ruleVersionTitle").textContent = state.ruleType;
+      document.getElementById("ruleVersionList").innerHTML = meta.versions.map(v => `<button class="item ${state.ruleVersion === v ? "active" : ""}" data-version="${v}">${v}<small>启用｜admin｜2026-05-18</small></button>`).join("");
+      document.querySelectorAll("[data-version]").forEach(btn => btn.addEventListener("click", () => { state.ruleVersion = btn.dataset.version; renderTables(); }));
+      document.getElementById("ruleDetailTitle").textContent = `${state.ruleVersion} 详情`;
+      document.getElementById("ruleStatus").textContent = "启用";
+      document.getElementById("ruleRows").textContent = `${meta.rows.length} 行`;
+      renderTable("rulePreview", meta.rows);
+    }
+    function renderFlows() {
+      const flow = flows[0];
+      document.getElementById("flowSelect").innerHTML = flows.map(f => `<option>${f.name}</option>`).join("");
+      document.getElementById("flowStepList").innerHTML = flow.steps.map((s, i) => `<a class="item" href="#step-${i+1}">步骤${i+1}｜${s.name}<small>${s.table}｜${s.match.length} 个匹配字段</small></a>`).join("");
+      document.getElementById("flowDiagram").innerHTML = `<div class="node source"><strong>事实表管理</strong><span>SAP事实表</span><span>运行时选择批次</span></div>` +
+        flow.steps.map((s, i) => `<div class="arrow">→</div><div class="node"><strong>步骤${i+1}：${s.name}</strong><span>配置表类型：${s.table}</span><span>匹配：${s.match.join("、")}</span><span>输出：${s.output.join("、")}</span><span>异常：记录异常并保留原行</span></div>`).join("");
+      document.getElementById("stepDetails").innerHTML = flow.steps.map((s, i) => `
+        <div class="step-card" id="step-${i+1}">
+          <h3>步骤${i+1}：${s.name}</h3>
+          <div class="form-row"><label>步骤名称</label><input type="text" value="${s.name}"></div>
+          <div class="form-row"><label>配置表类型</label><select>${Object.keys(ruleTables).map(t => `<option ${t === s.table ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+          <h3>匹配字段</h3><div class="checkbox-grid">${["年月","工厂代码","库位","移动类型","用户名","物料编码","品牌","型号"].map(f => `<label class="check-item"><input type="checkbox" ${s.match.includes(f) ? "checked" : ""}>${f}</label>`).join("")}</div>
+          <h3 style="margin-top:16px">输出字段</h3><div class="checkbox-grid">${["物料描述","品牌","型号","项目名","工艺分类","制式","标准工时系数","综合难度系数","单台加工费CNY"].map(f => `<label class="check-item"><input type="checkbox" ${s.output.includes(f) ? "checked" : ""}>${f}</label>`).join("")}</div>
+        </div>`).join("");
+    }
+    function renderRun() {
+      document.getElementById("runBatch").innerHTML = state.batches.map(b => `<option>${b.批次}｜${b.文件名}｜${b.导入行数} 行</option>`).join("");
+      document.getElementById("runFlow").innerHTML = flows.map(f => `<option>${f.name}</option>`).join("");
+      document.getElementById("versionSelectors").innerHTML = flows[0].steps.map(s => `<div class="form-row"><label>${s.name}版本</label><select>${ruleTables[s.table].versions.map(v => `<option>${s.table}｜${v}</option>`).join("")}</select></div>`).join("");
+      document.getElementById("runSummary").innerHTML = [`SAP批次：${state.batches[0].批次}`, `计算流程：${flows[0].name}`, `步骤数量：${flows[0].steps.length}`, "输出：54 行结果，0 行异常"].map(x => `<div class="card"><strong>${x.split("：")[0]}</strong><p>${x.split("：").slice(1).join("：")}</p></div>`).join("");
+    }
+    function renderResults() {
+      document.getElementById("resultRun").innerHTML = state.runs.map(r => `<option>${r.流程}｜${r.运行ID}｜${r.结果行数} 行｜${r.状态}</option>`).join("");
+      renderTable("resultTable", resultRows);
+    }
+    function renderExports() {
+      document.getElementById("exportRun").innerHTML = state.runs.map(r => `<option>${r.流程}｜${r.运行ID}｜${r.结果行数} 行｜${r.状态}</option>`).join("");
+      const options = Object.keys(resultRows[0]).filter(c => !c.startsWith("步骤1") && !["编码","命中规则行"].includes(c));
+      document.getElementById("exportFields").innerHTML = options.map(f => `<label class="check-item"><input type="checkbox" value="${f}" ${state.exportFields.includes(f) ? "checked" : ""}>${f}</label>`).join("");
+      document.querySelectorAll("#exportFields input").forEach(input => input.addEventListener("change", () => {
+        state.exportFields = Array.from(document.querySelectorAll("#exportFields input:checked")).map(x => x.value);
+        renderExportPreview();
+      }));
+      renderExportPreview();
+      renderTable("exportHistory", state.exports);
+    }
+    function renderExportPreview() {
+      const rows = resultRows.map(r => Object.fromEntries(state.exportFields.map(f => [f, r[f] ?? ""])));
+      document.getElementById("exportPreviewText").textContent = `共 54 行，当前选择 ${state.exportFields.length} 个字段，页面预览前 ${rows.length} 行。`;
+      renderTable("exportPreview", rows);
+    }
+    function render() {
+      renderSap();
+      renderTables();
+      renderFlows();
+      renderRun();
+      renderResults();
+      renderExports();
+    }
+    renderNav();
+    render();
+    document.getElementById("mockImport").addEventListener("click", () => toast("模拟导入完成：SAP_202503_20260518_180005，导入 54 行。"));
+    document.getElementById("addRuleType").addEventListener("click", () => toast("Demo 中已模拟新增配置表类型入口。"));
+    document.getElementById("moveRule").addEventListener("click", () => toast("配置表类型顺序已模拟调整。"));
+    document.getElementById("addRuleVersion").addEventListener("click", () => {
+      const value = document.getElementById("newVersionName").value || `${state.ruleType} 新版本`;
+      ruleTables[state.ruleType].versions.unshift(value);
+      state.ruleVersion = value;
+      document.getElementById("newVersionName").value = "";
+      renderTables();
+      toast("配置表版本已新增。");
+    });
+    document.getElementById("toggleRuleStatus").addEventListener("click", () => toast("版本状态已模拟切换。"));
+    document.getElementById("addFlow").addEventListener("click", () => toast("Demo 中已模拟新增流程入口。"));
+    document.getElementById("deleteFlow").addEventListener("click", () => toast("Demo 中不会删除默认流程。"));
+    document.getElementById("saveFlow").addEventListener("click", () => toast("流程配置已保存。"));
+    document.getElementById("saveStep").addEventListener("click", () => toast("步骤配置已保存。"));
+    document.getElementById("addNode").addEventListener("click", () => {
+      flows[0].steps.push({name:`新增步骤${flows[0].steps.length + 1}`, table:"物料主数据", match:["物料编码"], output:["品牌","型号"]});
+      renderFlows();
+      toast("已新增流程节点。");
+    });
+    document.getElementById("runCalc").addEventListener("click", () => { toast("计算完成：输出 54 行，异常 0 行。"); go("results"); });
+    document.getElementById("viewResult").addEventListener("click", () => toast("已切换结果批次。"));
+    document.getElementById("deleteResult").addEventListener("click", () => toast("Demo 中保留默认结果，真实系统支持删除。"));
+    document.getElementById("createExport").addEventListener("click", () => {
+      const stamp = new Date().toISOString().slice(0,19).replaceAll("-","").replace("T","_").replaceAll(":","");
+      state.exports.unshift({导出ID:`EXPORT_202503_${stamp}`, 归属年月:"202503", 计算结果批次:state.runs[0].运行ID, 行数:"54", 字段数:String(state.exportFields.length), 生成时间:new Date().toLocaleString("zh-CN")});
+      renderExports();
+      toast("加工费导出版本已生成。");
+    });
+  </script>
+</body>
+</html>

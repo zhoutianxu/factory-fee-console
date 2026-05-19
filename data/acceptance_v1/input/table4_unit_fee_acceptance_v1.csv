@@ -1,0 +1,10 @@
+yyyymm,factory_code,factory_name,model,factory_material_group,process_category,shipment_type,standard_type,unit_fee_local,currency_code,exchange_rate,unit_fee_cny,created_at,created_by,is_active,priority
+202501,F001,深圳工厂,M_EXACT,主板,组装,ALL,4G,10,CNY,1,10,2025-01-01,acceptance,Y,1
+202501,F001,深圳工厂,M_ALL,主板,组装,ALL,4G,20,CNY,1,20,2025-01-01,acceptance,Y,1
+202501,F004,成都工厂,M_NO_COEF,整机,组装,ALL,4G,15,CNY,1,15,2025-01-01,acceptance,Y,1
+202501,F006,南京工厂,M_NO_PNL,整机,组装,ALL,4G,11,CNY,1,11,2025-01-01,acceptance,Y,1
+202501,F007,重复工厂,ALL,ALL,ALL,ALL,ALL,12,CNY,1,12,2025-01-01,acceptance,Y,9
+202501,F007,重复工厂,ALL,ALL,ALL,ALL,ALL,13,CNY,1,13,2025-01-01,acceptance,Y,9
+202501,F008,美元工厂,M_USD,整机,组装,ALL,5G,5,USD,7.2,36,2025-01-01,acceptance,Y,1
+202501,F009,不计损益工厂,M_INCLUDE_NO,整机,组装,ALL,4G,8,CNY,1,8,2025-01-01,acceptance,Y,1
+202501,F010,异常数量工厂,M_BAD_QTY,整机,组装,ALL,4G,9,USD,,0,2025-01-01,acceptance,Y,1

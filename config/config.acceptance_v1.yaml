@@ -1,0 +1,16 @@
+app:
+  run_id_prefix: "ACCEPT_V1"
+  database_path: "data/acceptance_v1/factory_fee_acceptance.db"
+  output_dir: "data/acceptance_v1/output"
+  allow_blank_as_wildcard: false
+
+input_files:
+  sap_monthly: "data/acceptance_v1/input/sap_acceptance_v1.csv"
+  table2_material_master: "data/acceptance_v1/input/table2_material_master_acceptance_v1.csv"
+  table3_model_coef: "data/acceptance_v1/input/table3_model_coef_acceptance_v1.csv"
+  table4_unit_fee: "data/acceptance_v1/input/table4_unit_fee_acceptance_v1.csv"
+  table5_pnl_delivery_rule: "data/acceptance_v1/input/table5_pnl_delivery_rule_acceptance_v1.csv"
+
+run:
+  yyyymm: "202501"
+  factory_scope: ["F001", "F003", "F004", "F005", "F006", "F007", "F008", "F009", "F010"]

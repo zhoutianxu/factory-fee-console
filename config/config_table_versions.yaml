@@ -1,0 +1,67 @@
+config_table_versions:
+  table2_material_master:
+  - version_id: default
+    name: 表2 物料主数据 默认版
+    file: data/config_tables/table2_material_master/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T14:44:29.701075'
+  table3_model_coef:
+  - version_id: default
+    name: 表3 机型系数 默认版
+    file: data/config_tables/table3_model_coef/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T14:44:29.701642'
+  table4_unit_fee:
+  - version_id: default
+    name: 表4 单台加工费 默认版
+    file: data/config_tables/table4_unit_fee/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T14:44:29.702076'
+  table5_pnl_delivery_rule:
+  - version_id: default
+    name: 表5 损益交货量 默认版
+    file: data/config_tables/table5_pnl_delivery_rule/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T14:44:29.702373'
+  '2':
+  - version_id: default
+    name: 表2匹配规则表 默认版
+    description: 由现有配置表自动生成
+    created_by: system
+    file: data/config_tables/2/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T16:11:12.327431'
+  物料主数据匹配:
+  - version_id: default
+    name: 物料主数据匹配 默认版
+    description: 由现有配置表自动生成
+    created_by: system
+    file: data/config_tables/物料主数据匹配/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T17:34:52.259127'
+    updated_at: '2026-05-18T17:42:48.677110'
+  2物料主数据匹配:
+  - version_id: default
+    name: 物料主数据匹配 默认版
+    description: 由现有配置表自动生成
+    created_by: system
+    file: data/config_tables/2物料主数据匹配/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T17:43:19.405951'
+    updated_at: '2026-05-18T17:44:22.107752'
+  物料主数据匹配202503:
+  - version_id: default
+    name: 物料主数据匹配202503 默认版
+    description: 由现有配置表自动生成
+    created_by: system
+    file: data/config_tables/物料主数据匹配202503/default.csv
+    status: ACTIVE
+    created_at: '2026-05-18T17:45:07.893892'
+  物料主数据:
+  - version_id: v_20260518_175940
+    name: 物料主数据 v_20260518_175940
+    description: ''
+    created_by: admin
+    file: data/config_tables/物料主数据/v_20260518_175940.csv
+    status: ACTIVE
+    created_at: '2026-05-18T17:59:40.571269'

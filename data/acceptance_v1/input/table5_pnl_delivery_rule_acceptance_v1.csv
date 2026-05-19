@@ -1,0 +1,10 @@
+yyyymm,factory_code,factory_name,model_category,process_category,factory_material_group,include_pnl_delivery,pnl_delivery_coef,created_at,created_by,is_active,priority
+202501,F001,深圳工厂,CAT_EXACT,组装,主板,是,1,2025-01-01,acceptance,Y,1
+202501,F001,深圳工厂,CAT_ALL,ALL,ALL,是,0.5,2025-01-01,acceptance,Y,2
+202501,F004,成都工厂,CAT_NO_COEF,组装,整机,是,1,2025-01-01,acceptance,Y,1
+202501,F005,武汉工厂,CAT_NO_FEE,组装,整机,是,1,2025-01-01,acceptance,Y,1
+202501,F007,重复工厂,ALL,ALL,ALL,是,1,2025-01-01,acceptance,Y,4
+202501,F007,重复工厂,ALL,ALL,ALL,是,1.1,2025-01-01,acceptance,Y,4
+202501,F008,美元工厂,CAT_USD,组装,整机,是,2,2025-01-01,acceptance,Y,1
+202501,F009,不计损益工厂,CAT_INCLUDE_NO,组装,整机,否,1,2025-01-01,acceptance,Y,1
+202501,F010,异常数量工厂,CAT_BAD_QTY,组装,整机,是,1,2025-01-01,acceptance,Y,1

@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.netlify/
+dist/
+
+# Local runtime state
+*.db
+*.db-shm
+*.db-wal
+
+# Business input/output data generated or uploaded locally
+data/input/
+data/output/
+data/config_tables/
+data/periods/
+outputs/
+
+# Acceptance run artifacts
+data/acceptance_v1/output/
+data/acceptance_v1/*.db
+data/acceptance_v1/*.db-shm
+data/acceptance_v1/*.db-wal

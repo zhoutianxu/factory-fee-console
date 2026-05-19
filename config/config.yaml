@@ -1,0 +1,16 @@
+app:
+  run_id_prefix: "RUN_LOCAL"
+  database_path: "data/factory_fee.db"
+  output_dir: "data/output"
+  allow_blank_as_wildcard: false
+
+input_files:
+  sap_monthly: "data/input/sap_monthly.csv"
+  table2_material_master: "data/input/table2_material_master.csv"
+  table3_model_coef: "data/input/table3_model_coef.csv"
+  table4_unit_fee: "data/input/table4_unit_fee.csv"
+  table5_pnl_delivery_rule: "data/input/table5_pnl_delivery_rule.csv"
+
+run:
+  yyyymm: "202502"
+  factory_scope: ["F001", "F002"]

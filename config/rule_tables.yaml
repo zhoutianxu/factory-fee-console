@@ -1,0 +1,15 @@
+rule_tables:
+  物料主数据:
+    name: 物料主数据
+    description: 物料主数据
+    file: data/input/物料主数据.csv
+deleted_rule_tables:
+- table2_material_master
+- table3_model_coef
+- table4_unit_fee
+- table5_pnl_delivery_rule
+- '2'
+- 物料主数据匹配
+- 2物料主数据匹配
+- 物料主数据匹配202503
+rule_table_order: []

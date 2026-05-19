@@ -1,0 +1,11 @@
+yyyymm,factory_code,factory_name,location_code,movement_type,username,material_code,material_desc,brand,model,project_name,factory_material_group,model_category,process_category,standard_type,data_source,created_at,created_by,is_active,priority
+202501,F001,深圳工厂,L1,101,u_exact,MAT_EXACT,精确匹配物料,BRAND,M_EXACT,ProjectExact,主板,CAT_EXACT,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F001,深圳工厂,L2,ALL,ALL,MAT_ALL,ALL通配物料,BRAND,M_ALL,ProjectAll,主板,CAT_ALL,组装,4G,acceptance,2025-01-01,acceptance,Y,2
+202501,F004,成都工厂,L1,101,u_coef,MAT_NO_COEF,机型系数缺失,BRAND,M_NO_COEF,ProjectNoCoef,整机,CAT_NO_COEF,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F005,武汉工厂,L1,101,u_fee,MAT_NO_FEE,单台加工费缺失,BRAND,M_NO_FEE,ProjectNoFee,整机,CAT_NO_FEE,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F006,南京工厂,L1,101,u_pnl,MAT_NO_PNL,损益交货量规则缺失,BRAND,M_NO_PNL,ProjectNoPnl,整机,CAT_NO_PNL,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F007,重复工厂,L1,101,u_dup,MAT_DUP,同优先级重复命中A,BRAND,M_DUP_A,ProjectDupA,整机,CAT_DUP,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F007,重复工厂,L1,101,u_dup,MAT_DUP,同优先级重复命中B,BRAND,M_DUP_B,ProjectDupB,整机,CAT_DUP,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F008,美元工厂,L1,101,u_usd,MAT_USD,美元加工费换算,BRAND,M_USD,ProjectUsd,整机,CAT_USD,组装,5G,acceptance,2025-01-01,acceptance,Y,1
+202501,F009,不计损益工厂,L1,101,u_no_pnl,MAT_INCLUDE_NO,不计入损益交货量,BRAND,M_INCLUDE_NO,ProjectNoPnlQty,整机,CAT_INCLUDE_NO,组装,4G,acceptance,2025-01-01,acceptance,Y,1
+202501,F010,异常数量工厂,L1,101,u_bad_qty,MAT_BAD_QTY,交货数量异常,BRAND,M_BAD_QTY,ProjectBadQty,整机,CAT_BAD_QTY,组装,4G,acceptance,2025-01-01,acceptance,Y,1
