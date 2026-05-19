@@ -11,6 +11,7 @@ import yaml
 
 from .config import AppConfig
 from .db import init_db, write_df
+from .formula_engine import evaluate_calculated_columns
 from .io_files import normalize_common, read_table
 from .matcher import find_best_match
 
@@ -93,6 +94,8 @@ def run_merge_flow(
 
     sap = _load_sap_batch(conn, import_batch_id, row_limit=row_limit)
     steps = _flow_steps(flow, flow_key, cfg)
+    calculated_columns = _flow_calculated_columns(flow)
+    label_map = _formula_label_map()
 
     results: list[dict[str, Any]] = []
     exceptions: list[dict[str, Any]] = []
@@ -114,7 +117,7 @@ def run_merge_flow(
             priority_specs = _step_priority_specs(step)
             output_fields = [str(field) for field in step.get("output_fields", [])]
             active_col = str(step.get("active_col", flow.get("active_col", "is_active")))
-            outcome = find_best_match(merged, rules, priority_specs, active_col=active_col)
+            outcome = find_best_match(merged, rules, priority_specs, active_col=active_col, use_priority=False)
             step_slug = _safe_slug(rule_table_key or f"step_{step_index}")
             merged[f"step{step_index}_name"] = step.get("name", f"步骤{step_index}")
             merged[f"step{step_index}_match_status"] = outcome.status
@@ -163,6 +166,7 @@ def run_merge_flow(
         merged["hit_priority_material"] = last_priority
         merged["hit_rule_id_material"] = last_rule_id
         merged["merge_exception_reason"] = ";".join(step_exception_codes)
+        merged = evaluate_calculated_columns(merged, calculated_columns, label_map=label_map)
 
         results.append(merged)
         db_results.append({
@@ -248,8 +252,6 @@ def _priority_specs(flow: dict[str, Any]) -> list[tuple[int, list[tuple[str, str
 
 def _flow_steps(flow: dict[str, Any], flow_key: str, cfg: AppConfig) -> list[dict[str, Any]]:
     steps = [dict(step) for step in flow.get("steps", []) if step.get("right_table")]
-    if _should_append_default_downstream_steps(flow_key, steps, cfg):
-        return steps + _default_downstream_steps()
     if steps:
         return steps
     legacy_steps = [{
@@ -263,8 +265,6 @@ def _flow_steps(flow: dict[str, Any], flow_key: str, cfg: AppConfig) -> list[dic
         "output_fields": flow.get("output_fields", []),
         "active_col": flow.get("active_col", "is_active"),
     }]
-    if _should_append_default_downstream_steps(flow_key, legacy_steps, cfg):
-        return legacy_steps + _default_downstream_steps()
     return legacy_steps
 
 
@@ -332,6 +332,62 @@ def _step_priority_specs(step: dict[str, Any]) -> list[tuple[int, list[tuple[str
     if not pairs:
         raise ValueError(f"Merge step has no keys: {step.get('name', '')}")
     return [(1, pairs)]
+
+
+def _flow_calculated_columns(flow: dict[str, Any]) -> list[dict[str, Any]]:
+    if "calculated_columns" in flow:
+        return [dict(item) for item in flow.get("calculated_columns", [])]
+    return _default_calculated_columns()
+
+
+def _default_calculated_columns() -> list[dict[str, Any]]:
+    return [
+        {
+            "field": "pnl_delivery_qty",
+            "name": "损益交货量",
+            "formula": 'if_in(include_pnl_delivery, "是,Y,YES,1,TRUE", num(delivery_qty) * num(pnl_delivery_coef, 1), 0)',
+            "active": "Y",
+        },
+        {
+            "field": "unit_fee_cny",
+            "name": "单台加工费CNY",
+            "formula": 'if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local) * num(exchange_rate))',
+            "active": "Y",
+        },
+        {
+            "field": "fee_amount_cny",
+            "name": "加工费CNY",
+            "formula": "num(pnl_delivery_qty) * num(unit_fee_cny)",
+            "active": "Y",
+        },
+        {
+            "field": "std_hour",
+            "name": "标准工时",
+            "formula": "num(std_hour_coef) * num(delivery_qty)",
+            "active": "Y",
+        },
+        {
+            "field": "difficulty_value",
+            "name": "综合难度",
+            "formula": "num(difficulty_coef) * num(delivery_qty)",
+            "active": "Y",
+        },
+    ]
+
+
+def _formula_label_map() -> dict[str, str]:
+    label_map: dict[str, str] = {}
+    for canonical, aliases in RULE_COLUMN_ALIASES.items():
+        for alias in aliases:
+            label_map[str(alias)] = canonical
+    label_map.update({
+        "交货数量": "delivery_qty",
+        "损益交货量": "pnl_delivery_qty",
+        "加工费CNY": "fee_amount_cny",
+        "标准工时": "std_hour",
+        "综合难度": "difficulty_value",
+    })
+    return label_map
 
 
 def _safe_slug(value: object) -> str:

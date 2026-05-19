@@ -174,6 +174,116 @@ flows:
     assert '"std_hour_coef": "1.2"' in raw_json
 
 
+def test_configured_merge_ignores_hidden_priority_filter(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    pd.DataFrame([{
+        "yyyymm": "202502",
+        "factory_code": "F001",
+        "material_code": "MAT001",
+        "model": "M1",
+        "is_active": "Y",
+        "priority": "9",
+    }]).to_csv(cfg.input_files["table2_material_master"], index=False)
+
+    flow_config = tmp_path / "merge_flows.yaml"
+    flow_config.write_text(
+        """
+flows:
+  configured_only:
+    name: "按界面字段匹配"
+    steps:
+      - name: "匹配物料"
+        right_table: "table2_material_master"
+        keys:
+          - {left: "material_code", right: "material_code"}
+        output_fields: ["model"]
+""",
+        encoding="utf-8",
+    )
+
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        """
+        INSERT INTO raw_sap_monthly_data(
+            import_batch_id, raw_id, run_id, yyyymm, factory_code, material_code, delivery_qty
+        )
+        VALUES ('SAP_TEST', 1, '', '202502', 'F001', 'MAT001', 3)
+        """
+    )
+
+    summary = run_merge_flow(
+        conn,
+        cfg,
+        import_batch_id="SAP_TEST",
+        flow_key="configured_only",
+        merge_run_id="MERGE_PRIORITY_IGNORED",
+        flow_config_path=flow_config,
+    )
+
+    raw_json = conn.execute(
+        "SELECT raw_json FROM merge_result WHERE merge_run_id = 'MERGE_PRIORITY_IGNORED'"
+    ).fetchone()[0]
+    assert summary["exception_rows"] == 0
+    assert '"model": "M1"' in raw_json
+
+
+def test_merge_flow_applies_configured_calculated_columns(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    pd.DataFrame([{
+        "material_code": "MAT001",
+        "unit_fee_local": "2",
+        "is_active": "Y",
+        "priority": "9",
+    }]).to_csv(cfg.input_files["table2_material_master"], index=False)
+
+    flow_config = tmp_path / "merge_flows.yaml"
+    flow_config.write_text(
+        """
+flows:
+  calc_columns:
+    name: "计算列测试"
+    steps:
+      - name: "匹配物料"
+        right_table: "table2_material_master"
+        keys:
+          - {left: "material_code", right: "material_code"}
+        output_fields: ["unit_fee_local"]
+    calculated_columns:
+      - field: "fee_amount_cny"
+        name: "加工费CNY"
+        formula: "num(delivery_qty) * num(unit_fee_local)"
+        active: "Y"
+""",
+        encoding="utf-8",
+    )
+
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        """
+        INSERT INTO raw_sap_monthly_data(
+            import_batch_id, raw_id, run_id, yyyymm, factory_code, material_code, delivery_qty
+        )
+        VALUES ('SAP_TEST', 1, '', '202502', 'F001', 'MAT001', 3)
+        """
+    )
+
+    run_merge_flow(
+        conn,
+        cfg,
+        import_batch_id="SAP_TEST",
+        flow_key="calc_columns",
+        merge_run_id="MERGE_CALC_COLUMNS",
+        flow_config_path=flow_config,
+    )
+
+    raw_json = conn.execute(
+        "SELECT raw_json FROM merge_result WHERE merge_run_id = 'MERGE_CALC_COLUMNS'"
+    ).fetchone()[0]
+    assert '"fee_amount_cny": 6.0' in raw_json
+
+
 def _make_cfg(tmp_path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"

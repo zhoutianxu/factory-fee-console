@@ -16,7 +16,7 @@ from werkzeug.utils import secure_filename
 from .config import AppConfig, load_config
 from .db import connect, init_db
 from .io_files import normalize_common, read_table
-from .merge_flow import run_merge_flow
+from .merge_flow import run_merge_flow, _default_calculated_columns
 from .pipeline import run_pipeline
 from .sap_import import import_sap_file, normalize_yyyymm
 
@@ -583,7 +583,8 @@ def create_app(config_path: str | Path) -> Flask:
         if not steps:
             flash("请至少配置一个有效步骤和一个字段映射。", "error")
             return redirect(url_for("rules", tab="flows", flow=flow_key))
-        _update_merge_flow_config(cfg, flow_key, steps)
+        calculated_columns = _calculated_columns_from_form(request.form)
+        _update_merge_flow_config(cfg, flow_key, steps, calculated_columns)
         flash("匹配流程配置已保存。", "success")
         return redirect(url_for("rules", tab="flows", flow=flow_key))
 
@@ -1917,6 +1918,7 @@ def _merge_flow_config(cfg: AppConfig, flow_key: str) -> dict[str, Any]:
         "selected_rule_table": selected_rule_table,
         "rule_table_options": rule_table_options,
         "steps": steps,
+        "calculated_columns": _flow_calculated_columns_config(flow),
         "output_options": steps[0]["output_options"] if steps else [],
         "selected_output_fields": steps[0]["selected_output_fields"] if steps else [],
         "config_path": str(_merge_config_path(cfg)),
@@ -1959,8 +1961,6 @@ def _flow_config_steps(cfg: AppConfig, flow: dict[str, Any]) -> list[dict[str, A
             "output_fields": flow.get("output_fields", []),
             "unmatched": flow.get("unmatched", "mark_exception"),
         }]
-    if len(raw_steps) == 1 and str(flow.get("right_table", "")) == "table2_material_master":
-        raw_steps.extend(_default_downstream_steps())
     steps = []
     rule_tables = _rule_tables(cfg)
     left_fields = _sap_fact_fields()
@@ -2001,6 +2001,41 @@ def _flow_config_steps(cfg: AppConfig, flow: dict[str, Any]) -> list[dict[str, A
         })
         left_fields = _merge_unique_fields(left_fields, selected_output_fields)
     return steps
+
+
+def _flow_calculated_columns_config(flow: dict[str, Any]) -> list[dict[str, Any]]:
+    if "calculated_columns" in flow:
+        columns = [dict(item) for item in flow.get("calculated_columns", [])]
+    else:
+        columns = _default_calculated_columns()
+    out = []
+    for index, column in enumerate(columns, start=1):
+        out.append({
+            "index": index,
+            "field": str(column.get("field", "")),
+            "name": str(column.get("name", "")),
+            "formula": str(column.get("formula", "")),
+            "active": str(column.get("active", "Y")).upper() in {"Y", "YES", "TRUE", "1", "是"},
+        })
+    return out
+
+
+def _calculated_columns_from_form(form: Any) -> list[dict[str, str]]:
+    columns = []
+    indexes = sorted({int(value) for value in form.getlist("calc_index") if str(value).isdigit()})
+    for index in indexes:
+        field = _safe_table_key(form.get(f"calc_{index}_field", ""))
+        name = form.get(f"calc_{index}_name", "").strip()
+        formula = form.get(f"calc_{index}_formula", "").strip()
+        if not field or not formula:
+            continue
+        columns.append({
+            "field": field,
+            "name": name or _display_column_label(field),
+            "formula": formula,
+            "active": "Y" if form.get(f"calc_{index}_active") == "Y" else "N",
+        })
+    return columns
 
 
 def _default_downstream_steps() -> list[dict[str, Any]]:
@@ -2079,6 +2114,7 @@ def _update_merge_flow_config(
     cfg: AppConfig,
     flow_key: str,
     steps: list[dict[str, Any]],
+    calculated_columns: list[dict[str, str]] | None = None,
 ) -> None:
     raw = _load_merge_config(cfg)
     flows = raw.setdefault("flows", {})
@@ -2108,6 +2144,7 @@ def _update_merge_flow_config(
         }
         for index, step in enumerate(steps, start=1)
     ]
+    flow["calculated_columns"] = calculated_columns or []
     _save_merge_config(cfg, raw)
 
 
@@ -2194,14 +2231,14 @@ def _merge_flows_summary(cfg: AppConfig) -> list[dict[str, Any]]:
     out = []
     rule_tables = _rule_tables(cfg)
     for key, flow in flows.items():
-        priority_specs = flow.get("priority_specs", [])
-        first_keys = priority_specs[0].get("keys", []) if priority_specs else []
+        steps = [dict(step) for step in flow.get("steps", []) if step.get("right_table")]
+        first_keys = steps[0].get("keys", []) if steps else []
         field_labels = [
             _display_column_label(item.get("left", ""))
             for item in first_keys
             if item.get("left")
         ]
-        right_table = str(flow.get("right_table", ""))
+        right_table = str((steps[0] if steps else flow).get("right_table", ""))
         out.append({
             "key": str(key),
             "name": str(flow.get("name", key)),
@@ -2212,7 +2249,7 @@ def _merge_flows_summary(cfg: AppConfig) -> list[dict[str, Any]]:
             "join_type": str(flow.get("join_type", "left")),
             "field_labels": field_labels,
             "field_count": len(field_labels),
-            "output_count": len(flow.get("output_fields", [])),
+            "output_count": len((steps[0] if steps else flow).get("output_fields", [])),
             "unmatched": str(flow.get("unmatched", "mark_exception")),
         })
     return out
@@ -2259,6 +2296,7 @@ def _save_new_merge_flow(
         "join_type": "left",
         "active_col": "is_active",
         "steps": steps_payload,
+        "calculated_columns": _default_calculated_columns(),
         "priority_specs": [{
             "priority": 1,
             "keys": [{"left": field, "right": field} for field in selected_fields],
@@ -2558,6 +2596,13 @@ BASE_TEMPLATE = """
     .step-tabs { display: flex; gap: 8px; color: var(--muted); font-weight: 700; margin: 12px 0; }
     .step-tabs span { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: #f8faf9; }
     .optional-step[hidden] { display: none; }
+    .calc-column-list { display: grid; gap: 10px; margin-top: 12px; }
+    .calc-column-row {
+      display: grid;
+      grid-template-columns: 92px minmax(120px, 180px) minmax(150px, 220px) minmax(320px, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
     .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 10px; margin-top: 12px; }
     .check-item {
       display: flex;
@@ -2583,6 +2628,7 @@ BASE_TEMPLATE = """
       .stage-column { min-height: 520px; max-height: none; }
       .flow-middle { grid-template-columns: 1fr; }
       .flow-workbench { grid-template-columns: 1fr; }
+      .calc-column-row { grid-template-columns: 1fr; }
       .checkbox-grid { grid-template-columns: 1fr; }
       main { width: min(100vw - 20px, 1680px); }
       .table-wrap { max-height: 62vh; }
@@ -3039,12 +3085,67 @@ BASE_TEMPLATE = """
                   </div>
                 </div>
               {% endfor %}
+              <div class="step-card" id="calculated-columns">
+                <div class="button-row" style="margin-top:0">
+                  <div>
+                    <h2 style="margin:0">新增计算列</h2>
+                    <p class="muted" style="margin:6px 0 0">按顺序执行，后一列可以引用前一列。公式以字段编码为主，也支持 [中文字段名]。</p>
+                  </div>
+                  <button class="button secondary" id="add-calc-column" type="button">新增计算列</button>
+                </div>
+                <div id="calc-column-list" class="calc-column-list">
+                  {% for col in flow_config.calculated_columns %}
+                    <div class="calc-column-row">
+                      <input type="hidden" name="calc_index" value="{{ col.index }}">
+                      <label class="check-item" style="min-height:38px"><input type="checkbox" name="calc_{{ col.index }}_active" value="Y" {% if col.active %}checked{% endif %}><span>启用</span></label>
+                      <input name="calc_{{ col.index }}_name" type="text" value="{{ col.name }}" placeholder="列名，例如 加工费CNY">
+                      <input name="calc_{{ col.index }}_field" type="text" value="{{ col.field }}" placeholder="字段编码，例如 fee_amount_cny">
+                      <input name="calc_{{ col.index }}_formula" type="text" value="{{ col.formula }}" placeholder="公式，例如 num(pnl_delivery_qty) * num(unit_fee_cny)">
+                      <button class="button secondary remove-calc-column" type="button">删除</button>
+                    </div>
+                  {% endfor %}
+                </div>
+                <template id="calc-column-template">
+                  <div class="calc-column-row">
+                    <input type="hidden" name="calc_index" value="__INDEX__">
+                    <label class="check-item" style="min-height:38px"><input type="checkbox" name="calc___INDEX___active" value="Y" checked><span>启用</span></label>
+                    <input name="calc___INDEX___name" type="text" placeholder="列名，例如 新计算列">
+                    <input name="calc___INDEX___field" type="text" placeholder="字段编码，例如 custom_amount">
+                    <input name="calc___INDEX___formula" type="text" placeholder="公式，例如 num(delivery_qty) * 1.2">
+                    <button class="button secondary remove-calc-column" type="button">删除</button>
+                  </div>
+                </template>
+                <p class="muted">可用函数：num()、ifelse()、if_eq()、if_in()、coalesce()、round()。示例：if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local) * num(exchange_rate))</p>
+              </div>
               <div class="actions">
                 <button type="submit">保存流程配置</button>
               </div>
             </section>
           </div>
         </form>
+        <script>
+          (() => {
+            const list = document.getElementById('calc-column-list');
+            const template = document.getElementById('calc-column-template');
+            const addButton = document.getElementById('add-calc-column');
+            let nextIndex = {{ (flow_config.calculated_columns|length) + 1 }};
+            const bindRemove = (root) => {
+              root.querySelectorAll('.remove-calc-column').forEach((button) => {
+                button.addEventListener('click', () => button.closest('.calc-column-row')?.remove());
+              });
+            };
+            bindRemove(document);
+            addButton?.addEventListener('click', () => {
+              const html = template.innerHTML.replaceAll('__INDEX__', String(nextIndex));
+              const wrapper = document.createElement('div');
+              wrapper.innerHTML = html.trim();
+              const row = wrapper.firstElementChild;
+              list.appendChild(row);
+              bindRemove(row);
+              nextIndex += 1;
+            });
+          })();
+        </script>
         {% else %}
           <section class="panel">
             <h2>暂无计算流程配置</h2>

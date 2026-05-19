@@ -44,6 +44,7 @@ def find_best_match(
     rules: pd.DataFrame,
     priority_specs: list[tuple[int, list[tuple[str, str]]]],
     active_col: str = "is_active",
+    use_priority: bool = True,
 ) -> MatchOutcome:
     if rules.empty:
         return MatchOutcome("NOT_FOUND", None, None, "Rule table is empty")
@@ -65,7 +66,7 @@ def find_best_match(
         if candidates.empty:
             continue
 
-        if "priority" in candidates.columns:
+        if use_priority and "priority" in candidates.columns:
             candidates = candidates[candidates["priority"].astype(str).eq(str(priority))]
             if candidates.empty:
                 continue
@@ -78,9 +79,23 @@ def find_best_match(
                 f"Duplicated rules at priority {priority}: {len(candidates)} candidates",
             )
 
-        return MatchOutcome("MATCHED", candidates.iloc[0].to_dict(), priority, "Matched")
+        rule = candidates.iloc[0].to_dict()
+        reported_priority = priority
+        if not use_priority:
+            reported_priority = _rule_priority(rule)
+        return MatchOutcome("MATCHED", rule, reported_priority, "Matched")
 
     return MatchOutcome("NOT_FOUND", None, None, "No matching rule found")
+
+
+def _rule_priority(rule: dict[str, Any]) -> int | None:
+    try:
+        value = rule.get("priority")
+        if value is None or str(value).strip() == "":
+            return None
+        return int(float(value))
+    except Exception:
+        return None
 
 
 MATERIAL_SPECS = [
