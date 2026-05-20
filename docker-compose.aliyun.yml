@@ -1,0 +1,17 @@
+services:
+  factory-fee:
+    build:
+      context: .
+    image: factory-fee-console:1.1-aliyun
+    container_name: factory-fee-console
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    environment:
+      FACTORY_FEE_CONFIG: /app/config/config.production.yaml
+      FACTORY_FEE_DATABASE_PATH: /app/data/factory_fee.db
+      FACTORY_FEE_OUTPUT_DIR: /app/data/output
+      FACTORY_FEE_RUN_ID_PREFIX: RUN_SERVER
+      FACTORY_FEE_SECRET_KEY: ${FACTORY_FEE_SECRET_KEY:?set FACTORY_FEE_SECRET_KEY in .env}
+    volumes:
+      - ./runtime/data:/app/data

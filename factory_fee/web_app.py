@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -195,8 +196,12 @@ PERIOD_STATUS_LABELS = {
 def create_app(config_path: str | Path) -> Flask:
     cfg = load_config(config_path)
     app = Flask(__name__)
-    app.secret_key = "factory-fee-local-console"
+    app.secret_key = os.getenv("FACTORY_FEE_SECRET_KEY", "factory-fee-local-console")
     app.config["FACTORY_FEE_CONFIG"] = cfg
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok", "app": "factory-fee-console"}
 
     @app.get("/")
     def index() -> str:

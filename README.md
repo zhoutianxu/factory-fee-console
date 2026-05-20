@@ -71,6 +71,29 @@ http://127.0.0.1:5050
 
 双击 `Start_Windows.bat` 会自动创建 `.venv`、安装依赖并启动管理台。首次启动需要电脑能访问 Python 依赖源。
 
+## 阿里云部署
+
+V1.1 起，项目已补充服务器部署底座，支持以 Docker 方式部署到阿里云 ECS。
+
+相关文件：
+
+- `Dockerfile`
+- `docker-compose.aliyun.yml`
+- `.env.production.example`
+- `config/config.production.yaml`
+- `docs/ALIYUN_DEPLOYMENT.md`
+
+本地 Docker 验证：
+
+```bash
+cp .env.production.example .env
+docker compose -f docker-compose.aliyun.yml --env-file .env up --build
+```
+
+详细部署说明见：
+
+- docs/ALIYUN_DEPLOYMENT.md
+
 ## 进度与历史
 
 “添加规则与数据管理”工作的进度、历史、已实现能力、验收结论和下一步建议已整理到：

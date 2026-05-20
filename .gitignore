@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 .netlify/
 dist/
+.env
+runtime/
 
 # Local runtime state
 *.db
