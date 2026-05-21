@@ -1,0 +1,16 @@
+[Unit]
+Description=Factory Fee Console
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/factory-fee-console
+ExecStart=/usr/bin/docker compose -f docker-compose.aliyun.yml --env-file .env up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.aliyun.yml --env-file .env down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

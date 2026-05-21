@@ -4,14 +4,34 @@ services:
       context: .
     image: factory-fee-console:1.1-aliyun
     container_name: factory-fee-console
+    init: true
     restart: unless-stopped
     ports:
-      - "5050:5050"
+      - "${FACTORY_FEE_BIND_IP:-127.0.0.1}:${FACTORY_FEE_PORT:-5050}:5050"
+    env_file:
+      - .env
     environment:
-      FACTORY_FEE_CONFIG: /app/config/config.production.yaml
-      FACTORY_FEE_DATABASE_PATH: /app/data/factory_fee.db
-      FACTORY_FEE_OUTPUT_DIR: /app/data/output
+      FACTORY_FEE_RUNTIME_DIR: /app/runtime
+      FACTORY_FEE_CONFIG: /app/runtime/config/config.production.yaml
+      FACTORY_FEE_DATABASE_PATH: /app/runtime/data/factory_fee.db
+      FACTORY_FEE_OUTPUT_DIR: /app/runtime/data/output
       FACTORY_FEE_RUN_ID_PREFIX: RUN_SERVER
       FACTORY_FEE_SECRET_KEY: ${FACTORY_FEE_SECRET_KEY:?set FACTORY_FEE_SECRET_KEY in .env}
+      PORT: 5050
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
-      - ./runtime/data:/app/data
+      - ./runtime:/app/runtime
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5050/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

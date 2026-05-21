@@ -8,6 +8,7 @@ __pycache__
 .netlify
 dist
 outputs
+runtime
 data/*.db
 data/*.db-shm
 data/*.db-wal

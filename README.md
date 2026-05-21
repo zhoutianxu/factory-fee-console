@@ -80,14 +80,18 @@ V1.1 起，项目已补充服务器部署底座，支持以 Docker 方式部署�
 - `Dockerfile`
 - `docker-compose.aliyun.yml`
 - `.env.production.example`
+- `deploy/nginx/factory-fee-console.conf`
 - `config/config.production.yaml`
+- `scripts/aliyun_deploy.sh`
+- `scripts/aliyun_backup.sh`
+- `scripts/aliyun_restore.sh`
+- `scripts/aliyun_status.sh`
 - `docs/ALIYUN_DEPLOYMENT.md`
 
 本地 Docker 验证：
 
 ```bash
-cp .env.production.example .env
-docker compose -f docker-compose.aliyun.yml --env-file .env up --build
+bash scripts/aliyun_deploy.sh
 ```
 
 详细部署说明见：
