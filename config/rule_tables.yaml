@@ -3,6 +3,10 @@ rule_tables:
     name: 物料主数据
     description: 物料主数据
     file: data/input/物料主数据.csv
+  约当系数:
+    name: 难度系数表
+    description: 用于匹配难度系数与约当系数
+    file: data/input/约当系数.csv
 deleted_rule_tables:
 - table2_material_master
 - table3_model_coef
@@ -12,4 +16,6 @@ deleted_rule_tables:
 - 物料主数据匹配
 - 2物料主数据匹配
 - 物料主数据匹配202503
-rule_table_order: []
+rule_table_order:
+- 物料主数据
+- 约当系数

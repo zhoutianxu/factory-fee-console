@@ -112,6 +112,8 @@ def run_merge_flow(
         last_rule_id = None
 
         for step_index, step in enumerate(steps, start=1):
+            if str(step.get("step_action", step.get("operation", "merge"))) != "merge":
+                continue
             rule_table_key = str(step.get("right_table", ""))
             rules = _load_rule_table(cfg, rule_table_key, (config_versions or {}).get(rule_table_key))
             priority_specs = _step_priority_specs(step)
@@ -251,7 +253,11 @@ def _priority_specs(flow: dict[str, Any]) -> list[tuple[int, list[tuple[str, str
 
 
 def _flow_steps(flow: dict[str, Any], flow_key: str, cfg: AppConfig) -> list[dict[str, Any]]:
-    steps = [dict(step) for step in flow.get("steps", []) if step.get("right_table")]
+    steps = [
+        dict(step)
+        for step in flow.get("steps", [])
+        if step.get("right_table") or step.get("step_action") or step.get("operation")
+    ]
     if steps:
         return steps
     legacy_steps = [{

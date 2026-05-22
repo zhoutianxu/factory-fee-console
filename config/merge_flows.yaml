@@ -7,28 +7,119 @@ flows:
     join_type: left
     active_col: is_active
     steps:
-    - name: 匹配物料主数据
+    - name: 新增步骤3
+      step_category: modify_field
+      step_action: calculate
       left_table: raw_sap_monthly_data
-      right_table: 物料主数据
       join_type: left
       unmatched: mark_exception
+      calculated_columns: []
+    - name: 新增步骤2
+      step_category: modify_field
+      step_action: calculate
+      left_table: previous_result
+      join_type: left
+      unmatched: mark_exception
+      calculated_columns: []
+    - name: 新增步骤3
+      step_category: add_field
+      step_action: merge
+      left_table: previous_result
+      join_type: left
+      unmatched: mark_exception
+      right_table: 物料主数据
       keys:
       - left: material_code
         right: material_code
       output_fields: &id001
+      - yyyymm
+      - factory_code
+      - 一级部门
+      - 工厂
       - 物料组
       - material_desc
       - brand
-      - 型号
-      - 项目名
-      - 工厂机型类别
-      - process_category
-      - model_category
-      - standard_type
+    - name: 新增步骤4
+      step_category: add_field
+      step_action: merge
+      left_table: previous_result
+      join_type: left
+      unmatched: mark_exception
+      right_table: 物料主数据
+      keys:
+      - left: yyyymm
+        right: yyyymm
+      output_fields: []
     priority_specs:
     - priority: 1
       keys:
       - left: material_code
         right: material_code
     output_fields: *id001
+    unmatched: mark_exception
+    calculated_columns: []
+  '1':
+    name: '1'
+    description: '1'
+    left_table: raw_sap_monthly_data
+    right_table: 物料主数据
+    join_type: left
+    active_col: is_active
+    steps:
+    - name: 匹配物料主数据
+      left_table: raw_sap_monthly_data
+      right_table: 物料主数据
+      join_type: left
+      unmatched: mark_exception
+      keys:
+      - left: factory_code
+        right: factory_code
+      - left: material_code
+        right: material_code
+      output_fields: &id002
+      - factory_code
+      - factory_name
+      - location_code
+      - movement_type
+      - username
+      - material_code
+      - material_desc
+      - brand
+      - model
+      - project_name
+      - factory_material_group
+      - model_category
+      - process_category
+      - standard_type
+    calculated_columns:
+    - field: pnl_delivery_qty
+      name: 损益交货量
+      formula: if_in(include_pnl_delivery, "是,Y,YES,1,TRUE", num(delivery_qty) * num(pnl_delivery_coef,
+        1), 0)
+      active: Y
+    - field: unit_fee_cny
+      name: 单台加工费CNY
+      formula: if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local)
+        * num(exchange_rate))
+      active: Y
+    - field: fee_amount_cny
+      name: 加工费CNY
+      formula: num(pnl_delivery_qty) * num(unit_fee_cny)
+      active: Y
+    - field: std_hour
+      name: 标准工时
+      formula: num(std_hour_coef) * num(delivery_qty)
+      active: Y
+    - field: difficulty_value
+      name: 综合难度
+      formula: num(difficulty_coef) * num(delivery_qty)
+      active: Y
+    priority_specs:
+    - priority: 1
+      keys:
+      - left: factory_code
+        right: factory_code
+      - left: material_code
+        right: material_code
+    output_fields: *id002
     unmatched: mark_exception

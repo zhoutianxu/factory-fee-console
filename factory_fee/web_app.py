@@ -313,8 +313,8 @@ def create_app(config_path: str | Path) -> Flask:
         cfg = _cfg(app)
         period_id = _selected_period_id(cfg)
         batches = _sap_batches(cfg, period_id=period_id)
-        selected_batch = request.args.get("import_batch_id") or (batches[0]["import_batch_id"] if batches else "")
-        preview = _sap_batch_preview(cfg, selected_batch, limit=20) if selected_batch else {"columns": [], "rows": [], "row_count": 0}
+        selected_batch = request.args.get("import_batch_id", "").strip()
+        preview = _sap_batch_preview(cfg, selected_batch, limit=100) if selected_batch else {"columns": [], "rows": [], "row_count": 0}
         return render_template_string(
             BASE_TEMPLATE,
             page="sap",
@@ -322,6 +322,7 @@ def create_app(config_path: str | Path) -> Flask:
             rule_tables=_rule_tables(cfg),
             batches=batches,
             selected_batch=selected_batch,
+            selected_batch_meta=_sap_batch_meta(batches, selected_batch),
             preview=preview,
             periods=_periods(cfg),
             selected_period=period_id,
@@ -374,6 +375,24 @@ def create_app(config_path: str | Path) -> Flask:
         flash("SAP 导入批次及相关结果已删除。", "success")
         return redirect(url_for("sap_data", period=period_id))
 
+    @app.get("/sap/batches/<import_batch_id>/download")
+    def download_sap_batch(import_batch_id: str) -> Response:
+        cfg = _cfg(app)
+        df = _sap_batch_export_df(cfg, import_batch_id)
+        if df.empty:
+            flash("当前 SAP 批次没有可下载数据。", "error")
+            return redirect(url_for("sap_data"))
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="SAP流水"[:31])
+        output.seek(0)
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=f"{secure_filename(import_batch_id)}.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     @app.get("/sap/import")
     def sap_import_get() -> Response:
         return redirect(url_for("sap_data"))
@@ -387,6 +406,11 @@ def create_app(config_path: str | Path) -> Flask:
         if rules_tab not in {"tables", "flows"}:
             rules_tab = "tables"
         show_new_flow = request.args.get("new_flow") == "1"
+        show_new_type = request.args.get("new_type") == "1"
+        show_new_version = request.args.get("new_version") == "1"
+        show_table_preview = request.args.get("preview") == "1"
+        edit_step_index = _safe_int(request.args.get("edit_step"), 0)
+        selected_step_index = _safe_int(request.args.get("selected_step"), edit_step_index)
         rule_tables = _rule_tables(cfg)
         selected = request.args.get("table", "table2_material_master")
         if rule_tables and selected not in rule_tables:
@@ -400,11 +424,16 @@ def create_app(config_path: str | Path) -> Flask:
             versions = _config_table_versions(cfg, selected)
             selected_version = request.args.get("version") or (versions[0]["version_id"] if versions else "")
             preview_path = _config_version_file_path(cfg, selected, selected_version) if selected_version else _rule_file_path(cfg, selected)
-            preview = _table_preview(preview_path, selected)
+            preview = _table_preview(preview_path, selected, limit=100)
         merge_config = _merge_material_config(replace(cfg, yyyymm=period_id))
         merge_flows = _merge_flows_summary(cfg)
         selected_flow_key = request.args.get("flow") or (merge_flows[0]["key"] if merge_flows else "")
         flow_config = _merge_flow_config(cfg, selected_flow_key)
+        valid_step_indexes = [step["index"] for step in flow_config.get("steps", [])]
+        if edit_step_index and edit_step_index not in valid_step_indexes:
+            edit_step_index = 0
+        if selected_step_index not in valid_step_indexes:
+            selected_step_index = edit_step_index if edit_step_index in valid_step_indexes else (valid_step_indexes[0] if valid_step_indexes else 0)
         execution_config = _execution_config(cfg, selected_flow_key)
         batches = _sap_batches(cfg)
         return render_template_string(
@@ -412,6 +441,9 @@ def create_app(config_path: str | Path) -> Flask:
             page="rules",
             rules_tab=rules_tab,
             show_new_flow=show_new_flow,
+            show_new_type=show_new_type,
+            show_new_version=show_new_version,
+            show_table_preview=show_table_preview,
             selected_flow_key=selected_flow_key,
             cfg=replace(cfg, yyyymm=period_id),
             rule_tables=rule_tables,
@@ -427,6 +459,8 @@ def create_app(config_path: str | Path) -> Flask:
             periods=_periods(cfg),
             selected_period=period_id,
             period_locked=_is_period_locked(cfg, period_id),
+            edit_step_index=edit_step_index,
+            selected_step_index=selected_step_index,
         )
 
     @app.get("/config-tables")
@@ -553,7 +587,7 @@ def create_app(config_path: str | Path) -> Flask:
             left_fields = _merge_unique_fields(left_fields, extra_outputs)
         _save_new_merge_flow(cfg, flow_key, name, description, main_table, right_table, step_name, selected_fields, output_fields, extra_steps=extra_steps)
         flash(f"匹配流程已新增：{name}。", "success")
-        return redirect(url_for("rules", tab="flows", flow=flow_key))
+        return redirect(url_for("rules", tab="flows", flow=flow_key, selected_step=1))
 
     @app.post("/merge/flows/<flow_key>/update")
     def update_merge_flow(flow_key: str) -> Response:
@@ -564,7 +598,26 @@ def create_app(config_path: str | Path) -> Flask:
         steps = []
         left_fields = _sap_fact_fields()
         for step_index in step_indexes:
-            rule_table = request.form.get(f"step_{step_index}_rule_table", "").strip()
+            step_category = _normalize_step_category(request.form.get(f"step_{step_index}_category", "add_field"))
+            step_action = _normalize_step_action(request.form.get(f"step_{step_index}_action", "merge"))
+            if step_category == "modify_field":
+                step_action = "calculate"
+            step_name = request.form.get(f"step_{step_index}_name", f"步骤{step_index}").strip() or f"步骤{step_index}"
+            if step_action == "calculate":
+                steps.append({
+                    "name": step_name,
+                    "step_category": step_category,
+                    "step_action": step_action,
+                    "calculated_columns": _calculated_columns_from_form(request.form, prefix=f"step_{step_index}_calc"),
+                })
+                left_fields = _merge_unique_fields(left_fields, [
+                    col["field"]
+                    for col in steps[-1]["calculated_columns"]
+                    if step_category == "add_field"
+                ])
+                continue
+            default_rule_table = next(iter(rule_tables), "")
+            rule_table = request.form.get(f"step_{step_index}_rule_table", default_rule_table).strip() or default_rule_table
             if rule_table not in rule_tables:
                 continue
             match_options = _step_match_field_options(cfg, left_fields, rule_table)
@@ -579,7 +632,9 @@ def create_app(config_path: str | Path) -> Flask:
             valid_outputs = {item["field"] for item in output_options}
             output_fields = [field for field in request.form.getlist(f"step_{step_index}_output_fields") if field in valid_outputs]
             steps.append({
-                "name": request.form.get(f"step_{step_index}_name", f"步骤{step_index}").strip() or f"步骤{step_index}",
+                "name": step_name,
+                "step_category": step_category,
+                "step_action": step_action,
                 "right_table": rule_table,
                 "match_fields": selected_fields,
                 "output_fields": output_fields,
@@ -591,7 +646,17 @@ def create_app(config_path: str | Path) -> Flask:
         calculated_columns = _calculated_columns_from_form(request.form)
         _update_merge_flow_config(cfg, flow_key, steps, calculated_columns)
         flash("匹配流程配置已保存。", "success")
-        return redirect(url_for("rules", tab="flows", flow=flow_key))
+        selected_step = _safe_int(request.form.get("selected_step"), 0)
+        return_edit_step = _safe_int(request.form.get("return_edit_step"), 0)
+        redirect_args: dict[str, Any] = {
+            "tab": "flows",
+            "flow": flow_key,
+            "selected_step": selected_step or 1,
+            "period": _selected_period_id(cfg),
+        }
+        if return_edit_step:
+            redirect_args["edit_step"] = return_edit_step
+        return redirect(url_for("rules", **redirect_args))
 
     @app.post("/merge/flows/<flow_key>/steps/add")
     def add_merge_flow_step(flow_key: str) -> Response:
@@ -607,6 +672,8 @@ def create_app(config_path: str | Path) -> Flask:
             return redirect(url_for("rules", tab="flows", flow=flow_key, period=_selected_period_id(cfg)))
         steps.append({
             "name": f"新增步骤{len(steps) + 1}",
+            "step_category": "add_field",
+            "step_action": "merge",
             "left_table": "previous_result" if steps else "raw_sap_monthly_data",
             "right_table": default_table,
             "join_type": "left",
@@ -616,7 +683,15 @@ def create_app(config_path: str | Path) -> Flask:
         })
         _save_merge_config(cfg, raw)
         flash("步骤已新增，请在步骤详情中调整配置。", "success")
-        return redirect(url_for("rules", tab="flows", flow=flow_key, period=_selected_period_id(cfg)))
+        new_step_index = len(steps)
+        return redirect(url_for(
+            "rules",
+            tab="flows",
+            flow=flow_key,
+            selected_step=new_step_index,
+            edit_step=new_step_index,
+            period=_selected_period_id(cfg),
+        ))
 
     @app.post("/merge/flows/<flow_key>/steps/<int:step_index>/delete")
     def delete_merge_flow_step(flow_key: str, step_index: int) -> Response:
@@ -633,7 +708,27 @@ def create_app(config_path: str | Path) -> Flask:
             flow["steps"] = steps
             _save_merge_config(cfg, raw)
             flash("步骤已删除。", "success")
-        return redirect(url_for("rules", tab="flows", flow=flow_key, period=_selected_period_id(cfg)))
+        selected_step = min(step_index, len(steps)) if steps else 0
+        return redirect(url_for("rules", tab="flows", flow=flow_key, selected_step=selected_step, period=_selected_period_id(cfg)))
+
+    @app.post("/merge/flows/<flow_key>/steps/<int:step_index>/move/<direction>")
+    def move_merge_flow_step(flow_key: str, step_index: int, direction: str) -> Response:
+        cfg = _cfg(app)
+        flow_key = _safe_table_key(flow_key)
+        raw = _load_merge_config(cfg)
+        flow = raw.setdefault("flows", {}).setdefault(flow_key, {})
+        steps = list(flow.get("steps", []))
+        current = step_index - 1
+        target = current - 1 if direction == "up" else current + 1
+        if 0 <= current < len(steps) and 0 <= target < len(steps):
+            steps[current], steps[target] = steps[target], steps[current]
+            flow["steps"] = steps
+            _save_merge_config(cfg, raw)
+            flash("步骤顺序已更新。", "success")
+        else:
+            flash("当前步骤无法继续移动。", "error")
+        selected_step = target + 1 if 0 <= target < len(steps) else step_index
+        return redirect(url_for("rules", tab="flows", flow=flow_key, selected_step=selected_step, period=_selected_period_id(cfg)))
 
     @app.post("/merge/flows/<flow_key>/run")
     def run_configured_merge_flow(flow_key: str) -> Response:
@@ -959,6 +1054,13 @@ def _cfg(app: Flask) -> AppConfig:
 
 def _split_scope(value: str) -> list[str]:
     return [x.strip() for x in value.replace("，", ",").split(",") if x.strip()]
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _rule_catalog_path(cfg: AppConfig) -> Path:
@@ -1735,6 +1837,13 @@ def _sap_batches(cfg: AppConfig, period_id: str | None = None) -> list[dict[str,
         conn.close()
 
 
+def _sap_batch_meta(batches: list[dict[str, Any]], import_batch_id: str) -> dict[str, Any]:
+    for batch in batches:
+        if batch.get("import_batch_id") == import_batch_id:
+            return batch
+    return {}
+
+
 def _sap_batch_preview(cfg: AppConfig, import_batch_id: str, limit: int = 20) -> dict[str, Any]:
     if not import_batch_id:
         return {"columns": [], "rows": [], "row_count": 0}
@@ -1781,6 +1890,45 @@ def _sap_batch_preview(cfg: AppConfig, import_batch_id: str, limit: int = 20) ->
         conn.close()
     df = df.rename(columns={col: SAP_PREVIEW_LABELS.get(col, col) for col in df.columns})
     return {"columns": list(df.columns), "rows": df.to_dict("records"), "row_count": row_count}
+
+
+def _sap_batch_export_df(cfg: AppConfig, import_batch_id: str) -> pd.DataFrame:
+    conn = _connect_for_read(cfg)
+    try:
+        raw_rows = conn.execute(
+            """
+            SELECT source_columns_json, raw_json
+            FROM raw_sap_monthly_data
+            WHERE import_batch_id = ?
+              AND raw_json IS NOT NULL
+              AND raw_json <> ''
+            ORDER BY raw_id
+            """,
+            (import_batch_id,),
+        ).fetchall()
+        if raw_rows:
+            columns = _decode_source_columns(raw_rows[0][0])
+            rows = []
+            for _, raw_json in raw_rows:
+                raw = _decode_raw_row(raw_json)
+                rows.append({_display_column_label(col): raw.get(col, "") for col in columns})
+            return pd.DataFrame(rows, columns=[_display_column_label(col) for col in columns])
+
+        df = pd.read_sql_query(
+            """
+            SELECT raw_id, yyyymm, factory_code, factory_name, movement_type, location_code, username,
+                   order_no, legal_entity_code, biz_date, material_group, material_code, material_desc,
+                   delivery_qty_original, delivery_qty, source_table_name, source_file_name, source_row_no
+            FROM raw_sap_monthly_data
+            WHERE import_batch_id = ?
+            ORDER BY raw_id
+            """,
+            conn,
+            params=(import_batch_id,),
+        )
+    finally:
+        conn.close()
+    return df.rename(columns={col: SAP_PREVIEW_LABELS.get(col, col) for col in df.columns})
 
 
 def _decode_source_columns(value: str | None) -> list[str]:
@@ -1955,22 +2103,39 @@ def _execution_summary(cfg: AppConfig, batches: list[dict[str, Any]], flow_key: 
 
 
 def _flow_config_steps(cfg: AppConfig, flow: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_steps = [dict(step) for step in flow.get("steps", []) if step.get("right_table")]
+    raw_steps = [
+        dict(step)
+        for step in flow.get("steps", [])
+        if step.get("right_table") or step.get("step_action") or step.get("operation")
+    ]
     if not raw_steps:
         priority_specs = flow.get("priority_specs", [])
         keys = priority_specs[0].get("keys", []) if priority_specs else []
         raw_steps = [{
             "name": "匹配规则表",
+            "step_category": "add_field",
+            "step_action": "merge",
             "right_table": flow.get("right_table", "table2_material_master"),
             "keys": keys,
             "output_fields": flow.get("output_fields", []),
             "unmatched": flow.get("unmatched", "mark_exception"),
         }]
+    if flow.get("calculated_columns") and not any(_normalize_step_action(step.get("step_action", step.get("operation", ""))) == "calculate" for step in raw_steps):
+        raw_steps.append({
+            "name": "新增计算字段",
+            "step_category": "add_field",
+            "step_action": "calculate",
+            "calculated_columns": flow.get("calculated_columns", []),
+        })
     steps = []
     rule_tables = _rule_tables(cfg)
     left_fields = _sap_fact_fields()
     for index, step in enumerate(raw_steps, start=1):
-        right_table = str(step.get("right_table", "table2_material_master"))
+        step_category = _normalize_step_category(step.get("step_category", step.get("category", "add_field")))
+        step_action = _normalize_step_action(step.get("step_action", step.get("operation", "merge")))
+        if step_category == "modify_field":
+            step_action = "calculate"
+        right_table = str(step.get("right_table", "table2_material_master")) if step_action == "merge" else ""
         match_options = _step_match_field_options(cfg, left_fields, right_table)
         match_labels = {item["field"]: item["label"] for item in match_options}
         valid_match_fields = set(match_labels)
@@ -1991,9 +2156,17 @@ def _flow_config_steps(cfg: AppConfig, flow: dict[str, Any]) -> list[dict[str, A
         ]
         if not selected_output_fields:
             selected_output_fields = [item["field"] for item in output_options[:7]]
+        calculated_columns = _calculated_columns_from_config(step.get("calculated_columns", []))
         steps.append({
             "index": index,
             "name": str(step.get("name", f"步骤{index}")),
+            "step_category": step_category,
+            "step_action": step_action,
+            "step_category_label": "新增字段" if step_category == "add_field" else "修改字段",
+            "step_action_label": "合并" if step_action == "merge" else "计算",
+            "left_table": "raw_sap_monthly_data" if index == 1 else "previous_result",
+            "left_source_name": "事实表" if index == 1 else "上一步结果",
+            "left_source_detail": "运行时选择 SAP 导入批次" if index == 1 else "承接前一步输出字段",
             "right_table": right_table,
             "right_table_name": rule_tables.get(right_table, {}).get("name", right_table),
             "selected_fields": selected_fields,
@@ -2002,17 +2175,23 @@ def _flow_config_steps(cfg: AppConfig, flow: dict[str, Any]) -> list[dict[str, A
             "selected_output_fields": selected_output_fields,
             "selected_output_labels": [output_labels.get(field, _display_column_label(field)) for field in selected_output_fields],
             "output_options": output_options,
+            "calculated_columns": calculated_columns,
             "unmatched": str(step.get("unmatched", "mark_exception")),
         })
-        left_fields = _merge_unique_fields(left_fields, selected_output_fields)
+        if step_action == "merge":
+            left_fields = _merge_unique_fields(left_fields, selected_output_fields)
+        elif step_category == "add_field":
+            left_fields = _merge_unique_fields(left_fields, [col["field"] for col in calculated_columns])
     return steps
 
 
 def _flow_calculated_columns_config(flow: dict[str, Any]) -> list[dict[str, Any]]:
-    if "calculated_columns" in flow:
-        columns = [dict(item) for item in flow.get("calculated_columns", [])]
-    else:
-        columns = _default_calculated_columns()
+    columns = flow.get("calculated_columns", _default_calculated_columns())
+    return _calculated_columns_from_config(columns)
+
+
+def _calculated_columns_from_config(columns: Any) -> list[dict[str, Any]]:
+    columns = [dict(item) for item in columns or []]
     out = []
     for index, column in enumerate(columns, start=1):
         out.append({
@@ -2025,22 +2204,32 @@ def _flow_calculated_columns_config(flow: dict[str, Any]) -> list[dict[str, Any]
     return out
 
 
-def _calculated_columns_from_form(form: Any) -> list[dict[str, str]]:
+def _calculated_columns_from_form(form: Any, prefix: str = "calc") -> list[dict[str, str]]:
     columns = []
-    indexes = sorted({int(value) for value in form.getlist("calc_index") if str(value).isdigit()})
+    indexes = sorted({int(value) for value in form.getlist(f"{prefix}_index") if str(value).isdigit()})
     for index in indexes:
-        field = _safe_table_key(form.get(f"calc_{index}_field", ""))
-        name = form.get(f"calc_{index}_name", "").strip()
-        formula = form.get(f"calc_{index}_formula", "").strip()
+        field = _safe_table_key(form.get(f"{prefix}_{index}_field", ""))
+        name = form.get(f"{prefix}_{index}_name", "").strip()
+        formula = form.get(f"{prefix}_{index}_formula", "").strip()
         if not field or not formula:
             continue
         columns.append({
             "field": field,
             "name": name or _display_column_label(field),
             "formula": formula,
-            "active": "Y" if form.get(f"calc_{index}_active") == "Y" else "N",
+            "active": "Y" if form.get(f"{prefix}_{index}_active") == "Y" else "N",
         })
     return columns
+
+
+def _normalize_step_category(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in {"add_field", "modify_field"} else "add_field"
+
+
+def _normalize_step_action(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in {"merge", "calculate"} else "merge"
 
 
 def _default_downstream_steps() -> list[dict[str, Any]]:
@@ -2127,29 +2316,40 @@ def _update_merge_flow_config(
     flow.setdefault("name", flow_key)
     flow.setdefault("description", "")
     flow.setdefault("left_table", "raw_sap_monthly_data")
-    first_step = steps[0]
-    flow["right_table"] = first_step["right_table"]
+    merge_steps = [step for step in steps if step.get("step_action", "merge") == "merge"]
+    first_step = merge_steps[0] if merge_steps else steps[0]
+    flow["right_table"] = first_step.get("right_table", "")
     flow["join_type"] = "left"
     flow["active_col"] = "is_active"
     flow["priority_specs"] = [{
         "priority": 1,
-        "keys": [{"left": field, "right": field} for field in first_step["match_fields"]],
+        "keys": [{"left": field, "right": field} for field in first_step.get("match_fields", [])],
     }]
-    flow["output_fields"] = first_step["output_fields"]
+    flow["output_fields"] = first_step.get("output_fields", [])
     flow["unmatched"] = "mark_exception"
-    flow["steps"] = [
-        {
+    saved_steps = []
+    runtime_calculated_columns: list[dict[str, str]] = []
+    for index, step in enumerate(steps, start=1):
+        step_action = _normalize_step_action(step.get("step_action", "merge"))
+        step_category = _normalize_step_category(step.get("step_category", "add_field"))
+        payload = {
             "name": step["name"],
+            "step_category": step_category,
+            "step_action": step_action,
             "left_table": "raw_sap_monthly_data" if index == 1 else "previous_result",
-            "right_table": step["right_table"],
             "join_type": "left",
             "unmatched": "mark_exception",
-            "keys": [{"left": field, "right": field} for field in step["match_fields"]],
-            "output_fields": step["output_fields"],
         }
-        for index, step in enumerate(steps, start=1)
-    ]
-    flow["calculated_columns"] = calculated_columns or []
+        if step_action == "merge":
+            payload["right_table"] = step["right_table"]
+            payload["keys"] = [{"left": field, "right": field} for field in step["match_fields"]]
+            payload["output_fields"] = step["output_fields"]
+        else:
+            payload["calculated_columns"] = step.get("calculated_columns", [])
+            runtime_calculated_columns.extend(payload["calculated_columns"])
+        saved_steps.append(payload)
+    flow["steps"] = saved_steps
+    flow["calculated_columns"] = runtime_calculated_columns or calculated_columns or []
     _save_merge_config(cfg, raw)
 
 
@@ -2276,6 +2476,8 @@ def _save_new_merge_flow(
     flows = raw.setdefault("flows", {})
     steps_payload = [{
         "name": step_name,
+        "step_category": "add_field",
+        "step_action": "merge",
         "left_table": main_table,
         "right_table": right_table,
         "join_type": "left",
@@ -2286,6 +2488,8 @@ def _save_new_merge_flow(
     for step in extra_steps or []:
         steps_payload.append({
             "name": step["name"],
+            "step_category": "add_field",
+            "step_action": "merge",
             "left_table": "previous_result",
             "right_table": step["right_table"],
             "join_type": "left",
@@ -2358,17 +2562,20 @@ BASE_TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>工厂加工费管理台</title>
+  <title>工厂加工费计算系统</title>
   <style>
     :root {
       color-scheme: light;
-      --ink: #202124;
-      --muted: #5f6368;
-      --line: #d7dce2;
+      --ink: #101214;
+      --muted: #62666d;
+      --line: #e2e5e9;
+      --line-strong: #cfd4dc;
       --panel: #ffffff;
-      --band: #f4f7f9;
-      --accent: #166534;
-      --accent-dark: #14532d;
+      --band: #f7f8f8;
+      --soft: #f1f3f4;
+      --accent: #111315;
+      --accent-dark: #000000;
+      --accent-soft: #eef0f1;
       --warn: #b42318;
     }
     * { box-sizing: border-box; }
@@ -2380,22 +2587,32 @@ BASE_TEMPLATE = """
       font-size: 14px;
       letter-spacing: 0;
     }
-    header { background: #19332d; color: white; border-bottom: 1px solid #10231e; }
-    .header-inner, main { width: min(1680px, calc(100vw - 36px)); margin: 0 auto; }
-    .header-inner { display: flex; align-items: center; justify-content: space-between; min-height: 64px; gap: 24px; }
-    .brand { display: grid; gap: 2px; font-size: 20px; font-weight: 700; }
-    .brand small { font-size: 12px; font-weight: 500; color: #c7d8d1; }
-    nav { display: flex; gap: 6px; flex-wrap: wrap; }
-    nav a {
-      color: #dfe9e4;
-      text-decoration: none;
-      padding: 8px 12px;
-      border-radius: 6px;
-      line-height: 1;
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255,255,255,.92);
+      color: var(--ink);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: saturate(180%) blur(14px);
     }
-    nav a.active, nav a:hover { background: rgba(255,255,255,.14); color: #fff; }
-    main { padding: 24px 0 44px; }
-    h1 { font-size: 24px; margin: 0 0 8px; }
+    .header-inner, main { width: min(1560px, calc(100vw - 48px)); margin: 0 auto; }
+    .header-inner { display: flex; align-items: center; justify-content: space-between; min-height: 68px; gap: 24px; }
+    .brand { display: grid; gap: 3px; font-size: 18px; font-weight: 700; line-height: 1.15; }
+    .brand small { font-size: 12px; font-weight: 500; color: var(--muted); }
+    nav { display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      padding: 8px 10px;
+      border-radius: 999px;
+      line-height: 1;
+      font-weight: 650;
+      font-size: 13px;
+    }
+    nav a.active, nav a:hover { background: var(--accent-soft); color: var(--ink); }
+    main { padding: 34px 0 56px; }
+    h1 { font-size: 28px; line-height: 1.15; margin: 0 0 10px; }
     h2 { font-size: 18px; margin: 0 0 14px; }
     p { color: var(--muted); margin: 0; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin: 18px 0; }
@@ -2403,21 +2620,26 @@ BASE_TEMPLATE = """
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      box-shadow: none;
     }
-    .panel { padding: 18px; margin-top: 16px; overflow: hidden; }
+    .panel { padding: 22px; margin-top: 18px; overflow: hidden; }
     .metric { padding: 16px; }
     .metric strong { display: block; font-size: 28px; margin-top: 6px; }
     .form-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); gap: 12px; align-items: center; margin: 12px 0; }
-    label { color: #3c4043; font-weight: 600; }
+    label { color: #34373c; font-weight: 650; }
     input[type=text], input[type=file], select {
       width: 100%;
       min-height: 38px;
-      border: 1px solid #b8c2cc;
+      border: 1px solid var(--line-strong);
       border-radius: 6px;
       padding: 8px 10px;
       background: white;
       color: var(--ink);
+    }
+    input[type=text]:focus, input[type=file]:focus, select:focus {
+      outline: 2px solid #d8dcdf;
+      outline-offset: 1px;
+      border-color: var(--ink);
     }
     button, .button {
       display: inline-flex;
@@ -2435,28 +2657,29 @@ BASE_TEMPLATE = """
       white-space: nowrap;
     }
     button:hover, .button:hover { background: var(--accent-dark); }
-    .button.secondary { background: white; color: var(--accent); }
+    .button.secondary { background: white; color: var(--accent); border-color: var(--line-strong); }
+    .button.secondary:hover { background: var(--soft); color: var(--ink); }
     .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
     .button-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
     .button-row form { margin: 0; }
     .inline-form { display: inline-flex; margin: 0; gap: 8px; align-items: center; }
     table { width: max-content; min-width: 100%; border-collapse: collapse; table-layout: auto; }
     th, td {
-      border-bottom: 1px solid #e5e9ee;
+      border-bottom: 1px solid var(--line);
       padding: 9px 10px;
       text-align: left;
       vertical-align: top;
       line-height: 1.35;
       white-space: nowrap;
     }
-    th { background: #edf3f0; color: #33413c; font-weight: 700; position: sticky; top: 0; }
+    th { background: #f4f5f5; color: #34373c; font-weight: 700; position: sticky; top: 0; }
     th, td { white-space: nowrap; min-width: 96px; }
     td { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; max-height: min(68vh, 720px); }
     .table-wrap.dense th, .table-wrap.dense td { padding: 7px 8px; }
     .muted { color: var(--muted); }
     .flash { padding: 12px 14px; margin: 0 0 12px; }
-    .flash.success { border-color: #9dd4ad; background: #effaf2; }
+    .flash.success { border-color: #c8e6d1; background: #f4fbf6; }
     .flash.error { border-color: #f1a7a0; background: #fff3f2; color: var(--warn); }
     .rule-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
     .rule-list { display: grid; gap: 8px; }
@@ -2469,9 +2692,9 @@ BASE_TEMPLATE = """
       color: var(--ink);
       text-decoration: none;
     }
-    .rule-list a.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .rule-list a.active { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
     .rule-list small { display: block; color: var(--muted); margin-top: 5px; line-height: 1.35; }
-    .tabs { display: flex; gap: 8px; margin-top: 18px; border-bottom: 1px solid var(--line); }
+    .tabs { display: flex; gap: 6px; margin-top: 18px; border-bottom: 1px solid var(--line); }
     .tabs a {
       padding: 10px 14px;
       color: var(--muted);
@@ -2481,7 +2704,7 @@ BASE_TEMPLATE = """
       border-radius: 6px 6px 0 0;
       font-weight: 700;
     }
-    .tabs a.active { background: white; color: var(--accent); border-color: var(--line); }
+    .tabs a.active { background: white; color: var(--ink); border-color: var(--line); }
     .split-layout { display: grid; grid-template-columns: clamp(240px, 20vw, 320px) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 16px; }
     .progressive-workspace {
       display: grid;
@@ -2493,6 +2716,7 @@ BASE_TEMPLATE = """
       margin-top: 16px;
     }
     .stage-column {
+      min-width: 0;
       min-height: calc(100vh - 230px);
       background: var(--panel);
       border: 1px solid var(--line);
@@ -2504,9 +2728,7 @@ BASE_TEMPLATE = """
     .stage-column.compact {
       width: 220px;
     }
-    .stage-column.canvas {
-      background: #fbfdfc;
-    }
+    .stage-column.canvas { background: #fbfbfb; }
     .stage-column.detail {
       max-height: calc(100vh - 230px);
     }
@@ -2520,7 +2742,7 @@ BASE_TEMPLATE = """
       text-decoration: none;
       margin-top: 8px;
     }
-    .flow-card.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .flow-card.active { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
     .flow-setting-layout { display: grid; gap: 14px; margin-top: 16px; }
     .flow-top, .flow-bottom, .flow-middle > section {
       background: var(--panel);
@@ -2545,7 +2767,7 @@ BASE_TEMPLATE = """
       padding: 8px 4px 18px;
     }
     .flow-chain { overflow-x: auto; padding-bottom: 8px; white-space: nowrap; }
-    .flow-node { display: inline-block; vertical-align: middle; min-width: 220px; max-width: 280px; white-space: normal; border: 1px solid var(--line); border-radius: 8px; background: #f8faf9; padding: 14px; }
+    .flow-node { display: inline-block; vertical-align: middle; min-width: 220px; max-width: 280px; white-space: normal; border: 1px solid var(--line); border-radius: 8px; background: #fbfbfb; padding: 14px; }
     .diagram-node {
       width: 240px;
       flex: 0 0 240px;
@@ -2553,9 +2775,9 @@ BASE_TEMPLATE = """
       border-radius: 8px;
       background: white;
       padding: 14px;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      box-shadow: none;
     }
-    .diagram-node.source { border-color: #9fb7aa; background: #f4faf6; }
+    .diagram-node.source { border-color: var(--line-strong); background: #f8f9f9; }
     .diagram-node strong { display: block; margin-bottom: 8px; font-size: 15px; }
     .diagram-node span { display: block; color: var(--muted); line-height: 1.45; margin-top: 4px; white-space: normal; }
     .diagram-arrow {
@@ -2563,17 +2785,81 @@ BASE_TEMPLATE = """
       display: flex;
       align-items: center;
       justify-content: center;
-      color: var(--accent);
+      color: var(--ink);
       font-size: 24px;
       font-weight: 800;
     }
     .flow-node strong { display: block; margin-bottom: 6px; }
     .flow-node span { display: block; margin-top: 4px; color: var(--muted); }
     .flow-arrow { display: inline-block; vertical-align: middle; padding: 0 8px; color: var(--muted); font-weight: 700; }
+    .flow-section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 14px; }
+    .flow-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+    .flow-section-title { display: grid; gap: 4px; }
+    .flow-section-title h2 { margin: 0; }
+    .flow-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+    .flow-selector-row { display: grid; grid-template-columns: auto minmax(280px, 520px) minmax(180px, 1fr); gap: 12px; align-items: center; }
+    .flow-step-row { cursor: pointer; }
+    .flow-step-row.active { background: #f5f5f5; }
+    .flow-step-row.active td { font-weight: 650; }
+    .flow-step-row:hover { background: #f8f8f8; }
+    .step-radio-cell { width: 46px; text-align: center; }
+    .step-radio {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--ink);
+      cursor: pointer;
+      vertical-align: middle;
+    }
+    .step-diagram-wrap {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(190px, 1fr));
+      column-gap: 44px;
+      row-gap: 34px;
+      align-items: stretch;
+      overflow-x: auto;
+      padding: 8px 10px 12px 44px;
+    }
+    .diagram-step-card {
+      position: relative;
+      min-height: 142px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 14px;
+      box-shadow: none;
+    }
+    .diagram-step-card.active {
+      border-color: var(--ink);
+      background: #f4f4f4;
+      box-shadow: 0 8px 24px rgba(0,0,0,.08);
+    }
+    .diagram-step-card strong { display: block; margin-bottom: 8px; font-size: 15px; }
+    .diagram-step-card span { display: block; color: var(--muted); line-height: 1.45; margin-top: 4px; }
+    .diagram-step-card.has-next::after {
+      content: "→";
+      position: absolute;
+      right: -32px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--ink);
+      font-size: 24px;
+      font-weight: 800;
+    }
+    .diagram-step-card.wrap-start::before {
+      content: "↳";
+      position: absolute;
+      left: -34px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--ink);
+      font-size: 28px;
+      font-weight: 800;
+      line-height: 1;
+    }
     .summary-list { display: grid; gap: 10px; margin-top: 12px; }
-    .summary-item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfdfc; }
+    .summary-item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfbfb; }
     .version-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 12px 0; }
-    .version-meta div { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfdfc; }
+    .version-meta div { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfbfb; }
     .version-card {
       display: block;
       border: 1px solid var(--line);
@@ -2584,7 +2870,7 @@ BASE_TEMPLATE = """
       text-decoration: none;
       background: #fff;
     }
-    .version-card.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .version-card.active { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
     .version-card strong { display: block; }
     .compact-form .form-row { grid-template-columns: 1fr; gap: 6px; margin: 10px 0; }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(32,33,36,.42); z-index: 20; display: flex; justify-content: center; align-items: flex-start; padding: 24px; }
@@ -2598,8 +2884,47 @@ BASE_TEMPLATE = """
       box-shadow: 0 18px 60px rgba(0,0,0,.22);
     }
     .drawer-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 16px; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(16,18,20,.58);
+    }
+    .modal {
+      width: min(1480px, 86vw);
+      height: min(860px, 82vh);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 24px 90px rgba(0,0,0,.28);
+      overflow: hidden;
+    }
+    .modal-head, .modal-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+    }
+    .modal-foot { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
+    .modal-body { padding: 0 22px 18px; min-height: 0; overflow: auto; }
+    .modal-summary { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 22px; }
+    .summary-chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--muted); background: #fbfbfb; }
+    .modal-table { height: 100%; max-height: none; }
+    .modal .calc-column-row { grid-template-columns: 110px minmax(130px, 180px) minmax(150px, 220px) minmax(260px, 1fr) auto; }
     .step-tabs { display: flex; gap: 8px; color: var(--muted); font-weight: 700; margin: 12px 0; }
-    .step-tabs span { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: #f8faf9; }
+    .step-tabs span { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: #f8f9f9; }
+    .step-tabs span.active { color: var(--ink); border-color: var(--ink); background: #fff; }
+    .step-mode-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .step-logic-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #fff; }
+    .step-logic-card h2 { margin-bottom: 10px; }
     .optional-step[hidden] { display: none; }
     .calc-column-list { display: grid; gap: 10px; margin-top: 12px; }
     .calc-column-row {
@@ -2626,14 +2951,21 @@ BASE_TEMPLATE = """
       .checkbox-grid { grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); }
       .panel { padding: 20px; }
     }
+    .management-grid { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+    .table-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .table-actions form { margin: 0; }
     @media (max-width: 900px) {
       .header-inner { align-items: flex-start; flex-direction: column; padding: 14px 0; gap: 12px; }
       .grid, .rule-layout, .split-layout, .form-row { grid-template-columns: 1fr; }
+      .management-grid { grid-template-columns: 1fr; }
       .progressive-workspace { grid-template-columns: 200px 240px minmax(560px, 1fr) minmax(380px, 460px); overflow-x: auto; }
       .stage-column { min-height: 520px; max-height: none; }
       .flow-middle { grid-template-columns: 1fr; }
+      .flow-section-head, .flow-selector-row { grid-template-columns: 1fr; flex-direction: column; }
+      .step-diagram-wrap { grid-template-columns: repeat(2, minmax(190px, 1fr)); }
+      .diagram-step-card.has-next::after, .diagram-step-card.wrap-start::before { display: none; }
       .flow-workbench { grid-template-columns: 1fr; }
-      .calc-column-row { grid-template-columns: 1fr; }
+      .calc-column-row, .modal .calc-column-row, .step-mode-grid { grid-template-columns: 1fr; }
       .checkbox-grid { grid-template-columns: 1fr; }
       main { width: min(100vw - 20px, 1680px); }
       .table-wrap { max-height: 62vh; }
@@ -2643,7 +2975,7 @@ BASE_TEMPLATE = """
 <body>
   <header>
     <div class="header-inner">
-      <div class="brand">工厂加工费管理平台<small>演示版，Codex生成</small></div>
+      <div class="brand">工厂加工费计算系统<small>本系统借助Codex编写而成，如需帮助，请联系周天旭 13631554910</small></div>
       <nav>
         <a class="{{ 'active' if page == 'sap' else '' }}" href="{{ url_for('sap_data', period=selected_period or cfg.yyyymm) }}">1 事实表管理</a>
         <a class="{{ 'active' if page == 'rules' and rules_tab == 'tables' else '' }}" href="{{ url_for('config_tables', period=selected_period or cfg.yyyymm) }}">2 配置表管理</a>
@@ -2787,7 +3119,7 @@ BASE_TEMPLATE = """
       </section>
     {% elif page == 'sap' %}
       <h1>事实表管理</h1>
-      <p>上传 SAP 月度加工费流水，生成 SAP 导入批次，并写入本地数据库。</p>
+      <p>使用说明：上传上游系统数据，如SAP、决算系统数据，格式不限。</p>
       <section class="panel">
         <h2>导入 SAP 流水</h2>
         <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_sap') }}">
@@ -2810,17 +3142,20 @@ BASE_TEMPLATE = """
         </form>
       </section>
       <section class="panel">
-        <h2>已导入批次</h2>
+        <h2>已导入数据</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>SAP导入批次</th><th>年月</th><th>工厂范围</th><th>文件名</th><th>导入行数</th><th>导入时间</th><th>状态</th><th>预览</th></tr></thead>
+            <thead><tr><th>SAP导入批次</th><th>年月</th><th>工厂范围</th><th>文件名</th><th>导入行数</th><th>导入时间</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {% for batch in batches %}
                 <tr>
                   <td>{{ batch.import_batch_id }}</td><td>{{ batch.yyyymm }}</td><td>{{ batch.factory_scope }}</td><td>{{ batch.source_file_name }}</td><td>{{ batch.import_rows }}</td><td>{{ batch.imported_at }}</td><td>{{ batch.status_label }}</td>
                   <td>
-                    <a href="{{ url_for('sap_data', period=selected_period, import_batch_id=batch.import_batch_id) }}">查看</a>
-                    <form method="post" action="{{ url_for('delete_sap_batch', import_batch_id=batch.import_batch_id, period=selected_period) }}" style="display:inline"><button class="button secondary" type="submit">删除</button></form>
+                    <div class="button-row" style="margin-top:0">
+                      <a class="button secondary" href="{{ url_for('sap_data', period=selected_period, import_batch_id=batch.import_batch_id) }}">预览</a>
+                      <a class="button secondary" href="{{ url_for('download_sap_batch', import_batch_id=batch.import_batch_id, period=selected_period) }}">下载</a>
+                      <form method="post" action="{{ url_for('delete_sap_batch', import_batch_id=batch.import_batch_id, period=selected_period) }}"><button class="button secondary" type="submit">删除</button></form>
+                    </div>
                   </td>
                 </tr>
               {% else %}
@@ -2830,30 +3165,55 @@ BASE_TEMPLATE = """
           </table>
         </div>
       </section>
-      <section class="panel">
-        <h2>数据预览</h2>
-        <p>{% if selected_batch %}当前批次：{{ selected_batch }}，共 {{ preview.row_count }} 行，预览前 20 行。{% else %}暂无可预览批次。{% endif %}</p>
-        <div class="table-wrap">
-          <table>
-            <thead><tr>{% for col in preview.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
-            <tbody>
-              {% for row in preview.rows %}
-                <tr>{% for col in preview.columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>
-              {% else %}
-                <tr><td class="muted">暂无可预览数据</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
+      {% if selected_batch %}
+        <div class="modal-backdrop">
+          <section class="modal" role="dialog" aria-modal="true" aria-labelledby="sap-preview-title">
+            <div class="modal-head">
+              <div>
+                <h2 id="sap-preview-title">SAP 数据预览</h2>
+                <p>仅展示前 100 行数据，支持上下滑动和左右滚动。</p>
+              </div>
+              <a class="button secondary" href="{{ url_for('sap_data', period=selected_period) }}">关闭</a>
+            </div>
+            <div class="modal-summary">
+              <span class="summary-chip">批次 {{ selected_batch }}</span>
+              <span class="summary-chip">年月 {{ selected_batch_meta.yyyymm or '-' }}</span>
+              <span class="summary-chip">文件 {{ selected_batch_meta.source_file_name or '-' }}</span>
+              <span class="summary-chip">导入行数 {{ preview.row_count }}</span>
+              <span class="summary-chip">状态 {{ selected_batch_meta.status_label or '-' }}</span>
+            </div>
+            <div class="modal-body">
+              <div class="table-wrap modal-table">
+                <table>
+                  <thead><tr>{% for col in preview.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+                  <tbody>
+                    {% for row in preview.rows %}
+                      <tr>{% for col in preview.columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>
+                    {% else %}
+                      <tr><td class="muted">暂无可预览数据</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <a class="button secondary" href="{{ url_for('download_sap_batch', import_batch_id=selected_batch, period=selected_period) }}">下载完整数据</a>
+              <a class="button" href="{{ url_for('sap_data', period=selected_period) }}">关闭</a>
+            </div>
+          </section>
         </div>
-      </section>
+      {% endif %}
     {% elif page == 'rules' %}
       <h1>{% if rules_tab == 'tables' %}配置表管理{% else %}计算流程设置{% endif %}</h1>
-      <p>{% if rules_tab == 'tables' %}管理表2、表3、表4、表5以及表N的多个版本，版本可跨期间复用。{% else %}流程只定义步骤、匹配字段、输出字段，并引用配置表类型，不绑定具体版本。{% endif %}</p>
+      <p>{% if rules_tab == 'tables' %}使用说明：将主数据、系数表等用于计算、匹配的表格导入此页面。{% else %}使用说明：选择一个计算流程，在步骤模块管理流程步骤，步骤图解仅用于理解流程。{% endif %}</p>
 
       {% if rules_tab == 'tables' %}
-        <div class="progressive-workspace" style="grid-template-columns: 260px 320px minmax(760px, 1fr);">
-          <aside class="stage-column">
-            <h2>配置表类型</h2>
+        <div class="management-grid">
+          <section class="panel" style="margin-top:0">
+            <div class="button-row" style="margin-top:0; justify-content:space-between">
+              <h2 style="margin:0">配置表类型</h2>
+              <a class="button" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, new_type='1', period=selected_period) }}">新增类型</a>
+            </div>
             <div class="rule-list">
             {% for key, meta in rule_tables.items() %}
               <a class="{{ 'active' if selected == key else '' }}" href="{{ url_for('rules', tab='tables', table=key, period=selected_period) }}">
@@ -2871,286 +3231,432 @@ BASE_TEMPLATE = """
               <form class="inline-form" method="post" action="{{ url_for('delete_rule_table_type', table_key=selected, period=selected_period) }}"><button class="button secondary" type="submit">删除类型</button></form>
             </div>
             {% endif %}
-            <section id="new-rule-table" class="compact-form" style="margin-top:18px">
-              <h2>新增配置表类型</h2>
-              <form method="post" action="{{ url_for('create_rule_table') }}">
-                <div class="form-row">
-                  <label for="new_table_key">简称</label>
-                  <input id="new_table_key" name="table_key" type="text" placeholder="custom_model_map">
-                </div>
-                <div class="form-row">
-                  <label for="new_table_name">名称</label>
-                  <input id="new_table_name" name="name" type="text" placeholder="自定义机型映射表">
-                </div>
-                <div class="form-row">
-                  <label for="new_table_desc">说明</label>
-                  <input id="new_table_desc" name="description" type="text" placeholder="这张表的用途">
-                </div>
-                <div class="button-row">
-                  <button type="submit">新增类型</button>
-                </div>
-              </form>
-            </section>
-          </aside>
-          <aside class="stage-column">
-            <h2>配置表版本</h2>
-            {% if rule_tables %}
-            <p>{{ rule_tables[selected].name }}</p>
-            {% for version in config_versions %}
-              <a class="version-card {{ 'active' if version.version_id == selected_version else '' }}" href="{{ url_for('rules', tab='tables', table=selected, version=version.version_id, period=selected_period) }}">
-                <strong>{{ version.name }}</strong>
-                <span class="muted">{{ version.version_id }}｜{{ version.status_label }}</span>
-                <span class="muted">{{ version.created_by or 'admin' }}｜{{ version.created_at or '' }}</span>
-              </a>
-            {% else %}
-              <div class="version-card"><strong>暂无版本</strong><span class="muted">请在下方上传新增</span></div>
-            {% endfor %}
-            <form class="compact-form" method="post" enctype="multipart/form-data" action="{{ url_for('upload_rule', table_key=selected) }}" style="margin-top:18px">
-              <input type="hidden" name="period" value="{{ selected_period }}">
-              <h2>新增配置表版本</h2>
-              <div class="form-row">
-                <label for="version_id">版本编码</label>
-                <input id="version_id" name="version_id" type="text" placeholder="例如 202502_v1">
+          </section>
+          <section class="panel" style="margin-top:0">
+            <div class="button-row" style="margin-top:0; justify-content:space-between">
+              <div>
+                <h2 style="margin:0">配置表版本</h2>
+                <p>{% if rule_tables %}当前类型：{{ rule_tables[selected].name }}{% else %}请先创建配置表类型{% endif %}</p>
               </div>
-              <div class="form-row">
-                <label for="version_name">版本名称</label>
-                <input id="version_name" name="version_name" type="text" placeholder="例如 202502 正式版">
-              </div>
-              <div class="form-row">
-                <label for="version_description">版本说明</label>
-                <input id="version_description" name="version_description" type="text" placeholder="说明这个版本适用场景">
-              </div>
-              <div class="form-row">
-                <label for="created_by">创建人</label>
-                <input id="created_by" name="created_by" type="text" value="admin">
-              </div>
-              <div class="form-row">
-                <label for="file">上传规则文件</label>
-                <input id="file" name="file" type="file" accept=".csv,.xlsx,.xls">
-              </div>
-              <div class="button-row">
-                <button type="submit">新增配置表版本</button>
-              </div>
-            </form>
-            {% else %}
-              <div class="version-card"><strong>暂无版本</strong><span class="muted">新增配置表类型后再上传版本。</span></div>
-            {% endif %}
-          </aside>
-          <section class="stage-column detail">
-            {% if rule_tables %}
-            <h2>{{ rule_tables[selected].name }}详情</h2>
-            <p>{{ rule_tables[selected].description }}</p>
-            {% for version in config_versions if version.version_id == selected_version %}
-              <div class="version-meta">
-                <div><strong>版本名称</strong><p>{{ version.name }}</p></div>
-                <div><strong>版本说明</strong><p>{{ version.description or '无' }}</p></div>
-                <div><strong>创建人</strong><p>{{ version.created_by or 'admin' }}</p></div>
-                <div><strong>创建时间</strong><p>{{ version.created_at or '' }}</p></div>
-                <div><strong>状态</strong><p>{{ version.status_label }}</p></div>
-              </div>
-              <div class="actions">
-                <span class="muted">文件：{{ preview.path }}</span>
-                <span class="muted">总行数：{{ preview.row_count }}</span>
-              </div>
-              <div class="button-row">
-                <form class="inline-form" method="post" action="{{ url_for('update_config_version_status', table_key=selected, version_id=selected_version, period=selected_period) }}">
-                  <input type="hidden" name="status" value="{{ 'INACTIVE' if version.status == 'ACTIVE' else 'ACTIVE' }}">
-                  <button class="button secondary" type="submit">{{ '停用版本' if version.status == 'ACTIVE' else '启用版本' }}</button>
-                </form>
-                {% if preview.exists %}
-                  <a class="button secondary" href="{{ url_for('download_rule', table_key=selected, version=selected_version, period=selected_period) }}">下载当前版本</a>
-                  <form class="inline-form" method="post" action="{{ url_for('delete_rule_table_data', table_key=selected) }}"><input type="hidden" name="period" value="{{ selected_period }}"><input type="hidden" name="version" value="{{ selected_version }}"><button class="button secondary" type="submit">删除当前版本</button></form>
-                {% endif %}
-              </div>
-            {% endfor %}
-            <div class="actions"><span class="muted">预览前 30 行，标准字段在前，额外字段排在后续列。</span></div>
-            <div class="table-wrap">
+              {% if rule_tables %}
+                <a class="button" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, new_version='1', period=selected_period) }}">导入配置表</a>
+              {% endif %}
+            </div>
+            <div class="table-wrap" style="margin-top:16px">
               <table>
-                <thead><tr>{% for col in preview.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+                <thead><tr><th>配置表类型</th><th>版本名称</th><th>版本编码</th><th>创建人</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody>
-                  {% for row in preview.rows %}
-                    <tr>{% for col in preview.columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>
+                  {% for version in config_versions %}
+                    <tr>
+                      <td>{{ rule_tables[selected].name }}</td>
+                      <td>{{ version.name }}</td>
+                      <td>{{ version.version_id }}</td>
+                      <td>{{ version.created_by or 'admin' }}</td>
+                      <td>{{ version.created_at or '' }}</td>
+                      <td>{{ version.status_label }}</td>
+                      <td>
+                        <div class="table-actions">
+                          <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=version.version_id, preview='1', period=selected_period) }}">预览</a>
+                          <a class="button secondary" href="{{ url_for('download_rule', table_key=selected, version=version.version_id, period=selected_period) }}">下载</a>
+                          <form method="post" action="{{ url_for('delete_rule_table_data', table_key=selected) }}"><input type="hidden" name="period" value="{{ selected_period }}"><input type="hidden" name="version" value="{{ version.version_id }}"><button class="button secondary" type="submit">删除</button></form>
+                        </div>
+                      </td>
+                    </tr>
                   {% else %}
-                    <tr><td class="muted">暂无可预览数据</td></tr>
+                    <tr><td colspan="7" class="muted">暂无配置表版本，请点击“导入配置表”。</td></tr>
                   {% endfor %}
                 </tbody>
               </table>
             </div>
-            {% else %}
-              <h2>配置表详情</h2>
-              <p>当前没有任何配置表类型。请先在左侧新增一个配置表类型，再上传对应版本。</p>
-            {% endif %}
           </section>
         </div>
-      {% else %}
-        {% if merge_flows %}
-        <form id="flow-config-form" method="post" action="{{ url_for('update_merge_flow', flow_key=flow_config.flow_key) }}">
-          <input type="hidden" name="period" value="{{ selected_period }}">
-          <div class="flow-setting-layout">
-            <section class="flow-top">
-              <div class="button-row" style="margin-top:0">
-                <strong>流程选择</strong>
-                <select onchange="window.location='{{ url_for('rules', tab='flows', period=selected_period) }}&flow=' + this.value" style="max-width:420px">
-                  {% for flow in merge_flows %}
-                    <option value="{{ flow.key }}" {% if flow.key == selected_flow_key %}selected{% endif %}>{{ flow.name }}</option>
-                  {% endfor %}
-                </select>
-                <a class="button" href="{{ url_for('rules', tab='flows', new_flow='1', period=selected_period) }}">新增流程</a>
-                <button class="button secondary" type="submit" formaction="{{ url_for('delete_merge_flow', flow_key=flow_config.flow_key, period=selected_period) }}" formmethod="post">删除流程</button>
-                <button type="submit">保存流程配置</button>
+        {% if show_new_type %}
+          <div class="modal-backdrop">
+            <section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-type-title" style="width:min(720px, 92vw); height:auto;">
+              <div class="modal-head">
+                <div>
+                  <h2 id="new-type-title">新增配置表类型</h2>
+                  <p>先定义配置表类型，再导入对应版本。</p>
+                </div>
+                <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">关闭</a>
               </div>
-            </section>
-            <div class="flow-middle">
-              <section>
-                <div class="button-row" style="margin-top:0">
-                  <h2 style="margin:0">步骤</h2>
-                </div>
-                <div class="step-list">
-                  {% for step in flow_config.steps %}
-                    <a class="step-pill" href="#step-{{ step.index }}">
-                      <strong>步骤{{ step.index }}｜{{ step.name }}</strong>
-                      <span class="muted">{{ step.right_table_name }}｜{{ step.selected_fields|length }} 个匹配字段</span>
-                    </a>
-                  {% else %}
-                    <div class="step-pill"><strong>暂无步骤</strong><span class="muted">请新增流程步骤</span></div>
-                  {% endfor %}
-                </div>
-              </section>
-              <section>
-                <div class="button-row" style="margin-top:0">
-                  <h2 style="margin:0">流程图</h2>
-                  <button class="button secondary" type="submit" formaction="{{ url_for('add_merge_flow_step', flow_key=flow_config.flow_key, period=selected_period) }}" formmethod="post">新增节点</button>
-                </div>
-                <p>{{ flow_config.description or '流程只绑定配置表类型，运行时再选择具体版本。' }}</p>
-                <div class="flow-scroll">
-                  <div class="flow-diagram">
-                    <div class="diagram-node source">
-                      <strong>事实表管理</strong>
-                      <span>期间事实表</span>
-                      <span>运行时选择批次</span>
-                    </div>
-                    {% for step in flow_config.steps %}
-                      <div class="diagram-arrow">→</div>
-                      <div class="diagram-node">
-                        <strong>步骤{{ step.index }}：{{ step.name }}</strong>
-                        <span>配置表类型：{{ step.right_table_name }}</span>
-                        <span>匹配：{{ step.selected_labels|join('、') or '未配置' }}</span>
-                        <span>输出：{{ step.selected_output_labels|join('、') or '未配置' }}</span>
-                        <span>异常：记录异常并保留原行</span>
-                      </div>
-                    {% endfor %}
-                  </div>
-                </div>
-              </section>
-            </div>
-            <section class="flow-bottom">
-              <div class="button-row" style="margin-top:0">
-                <h2 style="margin:0">步骤详情</h2>
-                <button type="submit">保存步骤</button>
-              </div>
-              {% for step in flow_config.steps %}
-                <div class="step-card" id="step-{{ step.index }}">
-                  <input type="hidden" name="step_index" value="{{ step.index }}">
-                  <div class="button-row" style="margin-top:0">
-                    <h2 style="margin:0">步骤{{ step.index }}：{{ step.name }}</h2>
-                    <button class="button secondary" type="submit" formaction="{{ url_for('delete_merge_flow_step', flow_key=flow_config.flow_key, step_index=step.index, period=selected_period) }}" formmethod="post">删除步骤</button>
-                  </div>
-                  <p>左连接｜记录异常并保留原行</p>
+              <form method="post" action="{{ url_for('create_rule_table') }}">
+                <div class="modal-body" style="overflow:auto; padding-top:18px">
                   <div class="form-row">
-                    <label>步骤名称</label>
-                    <input name="step_{{ step.index }}_name" type="text" value="{{ step.name }}">
+                    <label for="new_table_key">简称</label>
+                    <input id="new_table_key" name="table_key" type="text" placeholder="custom_model_map">
                   </div>
+                  <div class="form-row">
+                    <label for="new_table_name">名称</label>
+                    <input id="new_table_name" name="name" type="text" placeholder="自定义机型映射表">
+                  </div>
+                  <div class="form-row">
+                    <label for="new_table_desc">说明</label>
+                    <input id="new_table_desc" name="description" type="text" placeholder="这张表的用途">
+                  </div>
+                </div>
+                <div class="modal-foot">
+                  <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">取消</a>
+                  <button type="submit">保存类型</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        {% endif %}
+        {% if show_new_version and rule_tables %}
+          <div class="modal-backdrop">
+            <section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-version-title" style="width:min(860px, 92vw); height:auto;">
+              <div class="modal-head">
+                <div>
+                  <h2 id="new-version-title">导入配置表</h2>
+                  <p>当前类型：{{ rule_tables[selected].name }}</p>
+                </div>
+                <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">关闭</a>
+              </div>
+              <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_rule', table_key=selected) }}">
+                <input type="hidden" name="period" value="{{ selected_period }}">
+                <div class="modal-body" style="overflow:auto; padding-top:18px">
                   <div class="form-row">
                     <label>配置表类型</label>
-                    <select name="step_{{ step.index }}_rule_table" onchange="this.form.submit()">
-                      {% for item in merge_config.rule_table_options %}
-                        <option value="{{ item.key }}" {% if item.key == step.right_table %}selected{% endif %}>{{ item.name }}</option>
-                      {% endfor %}
-                    </select>
+                    <input type="text" value="{{ rule_tables[selected].name }}" disabled>
                   </div>
-                  <h2>匹配字段</h2>
-                  <div class="checkbox-grid">
-                    {% for item in step.match_options %}
-                      <label class="check-item">
-                        <input type="checkbox" name="step_{{ step.index }}_match_fields" value="{{ item.field }}" {% if item.field in step.selected_fields %}checked{% endif %}>
-                        <span>{{ item.label }}</span>
-                      </label>
-                    {% endfor %}
+                  <div class="form-row">
+                    <label for="version_id">版本编码</label>
+                    <input id="version_id" name="version_id" type="text" placeholder="例如 202502_v1">
                   </div>
-                  <h2 style="margin-top:16px">输出字段</h2>
-                  <div class="checkbox-grid">
-                    {% for item in step.output_options %}
-                      <label class="check-item">
-                        <input type="checkbox" name="step_{{ step.index }}_output_fields" value="{{ item.field }}" {% if item.field in step.selected_output_fields %}checked{% endif %}>
-                        <span>{{ item.label }}</span>
-                      </label>
-                    {% else %}
-                      <span class="muted">当前配置表暂无可选择输出字段，请先上传配置表数据。</span>
-                    {% endfor %}
+                  <div class="form-row">
+                    <label for="version_name">版本名称</label>
+                    <input id="version_name" name="version_name" type="text" placeholder="例如 202502 正式版">
+                  </div>
+                  <div class="form-row">
+                    <label for="version_description">版本说明</label>
+                    <input id="version_description" name="version_description" type="text" placeholder="说明这个版本适用场景">
+                  </div>
+                  <div class="form-row">
+                    <label for="created_by">创建人</label>
+                    <input id="created_by" name="created_by" type="text" value="admin">
+                  </div>
+                  <div class="form-row">
+                    <label for="file">上传文件</label>
+                    <input id="file" name="file" type="file" accept=".csv,.xlsx,.xls">
                   </div>
                 </div>
-              {% endfor %}
-              <div class="step-card" id="calculated-columns">
-                <div class="button-row" style="margin-top:0">
-                  <div>
-                    <h2 style="margin:0">新增计算列</h2>
-                    <p class="muted" style="margin:6px 0 0">按顺序执行，后一列可以引用前一列。公式以字段编码为主，也支持 [中文字段名]。</p>
-                  </div>
-                  <button class="button secondary" id="add-calc-column" type="button">新增计算列</button>
+                <div class="modal-foot">
+                  <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">取消</a>
+                  <button type="submit">导入配置表</button>
                 </div>
-                <div id="calc-column-list" class="calc-column-list">
-                  {% for col in flow_config.calculated_columns %}
-                    <div class="calc-column-row">
-                      <input type="hidden" name="calc_index" value="{{ col.index }}">
-                      <label class="check-item" style="min-height:38px"><input type="checkbox" name="calc_{{ col.index }}_active" value="Y" {% if col.active %}checked{% endif %}><span>启用</span></label>
-                      <input name="calc_{{ col.index }}_name" type="text" value="{{ col.name }}" placeholder="列名，例如 加工费CNY">
-                      <input name="calc_{{ col.index }}_field" type="text" value="{{ col.field }}" placeholder="字段编码，例如 fee_amount_cny">
-                      <input name="calc_{{ col.index }}_formula" type="text" value="{{ col.formula }}" placeholder="公式，例如 num(pnl_delivery_qty) * num(unit_fee_cny)">
-                      <button class="button secondary remove-calc-column" type="button">删除</button>
-                    </div>
-                  {% endfor %}
+              </form>
+            </section>
+          </div>
+        {% endif %}
+        {% if show_table_preview and selected_version %}
+          <div class="modal-backdrop">
+            <section class="modal" role="dialog" aria-modal="true" aria-labelledby="config-preview-title">
+              <div class="modal-head">
+                <div>
+                  <h2 id="config-preview-title">配置表数据预览</h2>
+                  <p>仅展示前 100 行数据，支持上下滑动和左右滚动。</p>
                 </div>
-                <template id="calc-column-template">
-                  <div class="calc-column-row">
-                    <input type="hidden" name="calc_index" value="__INDEX__">
-                    <label class="check-item" style="min-height:38px"><input type="checkbox" name="calc___INDEX___active" value="Y" checked><span>启用</span></label>
-                    <input name="calc___INDEX___name" type="text" placeholder="列名，例如 新计算列">
-                    <input name="calc___INDEX___field" type="text" placeholder="字段编码，例如 custom_amount">
-                    <input name="calc___INDEX___formula" type="text" placeholder="公式，例如 num(delivery_qty) * 1.2">
-                    <button class="button secondary remove-calc-column" type="button">删除</button>
-                  </div>
-                </template>
-                <p class="muted">可用函数：num()、ifelse()、if_eq()、if_in()、coalesce()、round()。示例：if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local) * num(exchange_rate))</p>
+                <a class="button secondary" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">关闭</a>
               </div>
-              <div class="actions">
-                <button type="submit">保存流程配置</button>
+              <div class="modal-summary">
+                <span class="summary-chip">类型 {{ rule_tables[selected].name if rule_tables else '-' }}</span>
+                <span class="summary-chip">版本 {{ selected_version }}</span>
+                <span class="summary-chip">总行数 {{ preview.row_count }}</span>
+                {% for version in config_versions if version.version_id == selected_version %}
+                  <span class="summary-chip">创建人 {{ version.created_by or 'admin' }}</span>
+                  <span class="summary-chip">状态 {{ version.status_label }}</span>
+                {% endfor %}
+              </div>
+              <div class="modal-body">
+                <div class="table-wrap modal-table">
+                  <table>
+                    <thead><tr>{% for col in preview.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+                    <tbody>
+                      {% for row in preview.rows %}
+                        <tr>{% for col in preview.columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>
+                      {% else %}
+                        <tr><td class="muted">暂无可预览数据</td></tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="modal-foot">
+                <a class="button secondary" href="{{ url_for('download_rule', table_key=selected, version=selected_version, period=selected_period) }}">下载完整数据</a>
+                <a class="button" href="{{ url_for('rules', tab='tables', table=selected, version=selected_version, period=selected_period) }}">关闭</a>
               </div>
             </section>
           </div>
+        {% endif %}
+      {% else %}
+        {% if merge_flows %}
+        {% set active_step_index = selected_step_index %}
+        {% set active_step = namespace(name='未选择') %}
+        {% for step in flow_config.steps if step.index == active_step_index %}
+          {% set active_step.name = step.name %}
+        {% endfor %}
+        <form id="flow-config-form" method="post" action="{{ url_for('update_merge_flow', flow_key=flow_config.flow_key) }}">
+          <input type="hidden" name="period" value="{{ selected_period }}">
+          <input type="hidden" name="selected_step" value="{{ active_step_index }}">
+          <section class="flow-section">
+            <div class="flow-section-head">
+              <div class="flow-section-title">
+                <h2>流程选择</h2>
+                <span class="muted">先选择流程，再维护下方步骤。</span>
+              </div>
+              <div class="flow-actions">
+                <a class="button" href="{{ url_for('rules', tab='flows', new_flow='1', period=selected_period) }}">新增流程</a>
+                <button class="button secondary" type="submit" formaction="{{ url_for('delete_merge_flow', flow_key=flow_config.flow_key, period=selected_period) }}" formmethod="post">删除流程</button>
+                <button type="submit">保存流程</button>
+              </div>
+            </div>
+            <div class="flow-selector-row">
+              <strong>当前流程</strong>
+              <select onchange="window.location='{{ url_for('rules', tab='flows', period=selected_period) }}&flow=' + this.value + '&selected_step=1'">
+                {% for flow in merge_flows %}
+                  <option value="{{ flow.key }}" {% if flow.key == selected_flow_key %}selected{% endif %}>{{ flow.name }}</option>
+                {% endfor %}
+              </select>
+              <span class="muted">{{ flow_config.steps|length }} 个步骤｜{{ flow_config.calculated_columns|selectattr('active')|list|length }} 个计算字段</span>
+            </div>
+          </section>
+
+          {% for step in flow_config.steps if step.index != edit_step_index %}
+            <input type="hidden" name="step_index" value="{{ step.index }}">
+            <input type="hidden" name="step_{{ step.index }}_name" value="{{ step.name }}">
+            <input type="hidden" name="step_{{ step.index }}_category" value="{{ step.step_category }}">
+            <input type="hidden" name="step_{{ step.index }}_action" value="{{ step.step_action }}">
+            {% if step.step_action == 'merge' %}
+              <input type="hidden" name="step_{{ step.index }}_rule_table" value="{{ step.right_table }}">
+              {% for field in step.selected_fields %}<input type="hidden" name="step_{{ step.index }}_match_fields" value="{{ field }}">{% endfor %}
+              {% for field in step.selected_output_fields %}<input type="hidden" name="step_{{ step.index }}_output_fields" value="{{ field }}">{% endfor %}
+            {% else %}
+              {% for col in step.calculated_columns %}
+                <input type="hidden" name="step_{{ step.index }}_calc_index" value="{{ col.index }}">
+                <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_name" value="{{ col.name }}">
+                <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_field" value="{{ col.field }}">
+                <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_formula" value="{{ col.formula }}">
+                {% if col.active %}<input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_active" value="Y">{% endif %}
+              {% endfor %}
+            {% endif %}
+          {% endfor %}
+
+          <section class="flow-section">
+            <div class="flow-section-head">
+              <div class="flow-section-title">
+                <h2>步骤管理</h2>
+                <span class="muted">当前选中：{% if active_step_index %}步骤{{ active_step_index }} {{ active_step.name }}{% else %}未选择{% endif %}</span>
+              </div>
+              <div class="flow-actions">
+                <button class="button" type="submit" formaction="{{ url_for('add_merge_flow_step', flow_key=flow_config.flow_key, period=selected_period) }}" formmethod="post">新增步骤</button>
+                <button class="button secondary" type="submit" formaction="{{ url_for('move_merge_flow_step', flow_key=flow_config.flow_key, step_index=active_step_index, direction='up', period=selected_period) }}" formmethod="post" {% if not active_step_index %}disabled{% endif %}>上移</button>
+                <button class="button secondary" type="submit" formaction="{{ url_for('move_merge_flow_step', flow_key=flow_config.flow_key, step_index=active_step_index, direction='down', period=selected_period) }}" formmethod="post" {% if not active_step_index %}disabled{% endif %}>下移</button>
+                <button class="button secondary" type="submit" formaction="{{ url_for('delete_merge_flow_step', flow_key=flow_config.flow_key, step_index=active_step_index, period=selected_period) }}" formmethod="post" {% if not active_step_index %}disabled{% endif %}>删除步骤</button>
+              </div>
+            </div>
+            <div class="table-wrap" style="margin-top:14px; max-height:none">
+              <table>
+                <thead><tr><th class="step-radio-cell">选择</th><th>顺序</th><th>步骤名称</th><th>步骤类型</th><th>左侧数据源</th><th>配置对象</th><th>关键字段</th><th>输出/目标</th><th>操作</th></tr></thead>
+                <tbody>
+                  {% for step in flow_config.steps %}
+                    <tr class="flow-step-row {% if step.index == active_step_index %}active{% endif %}" data-step-url="{{ url_for('rules', tab='flows', flow=flow_config.flow_key, selected_step=step.index, period=selected_period) }}" onclick="window.location=this.dataset.stepUrl">
+                      <td class="step-radio-cell">
+                        <input class="step-radio" type="radio" name="visible_selected_step" value="{{ step.index }}" aria-label="选择步骤{{ step.index }}" {% if step.index == active_step_index %}checked{% endif %} onclick="event.stopPropagation(); window.location=this.closest('tr').dataset.stepUrl">
+                      </td>
+                      <td>{{ step.index }}</td>
+                      <td>{{ step.name }}</td>
+                      <td>{{ step.step_category_label }} / {{ step.step_action_label }}</td>
+                      <td>{{ step.left_source_name }}</td>
+                      <td>{% if step.step_action == 'merge' %}{{ step.right_table_name }}{% else %}字段计算{% endif %}</td>
+                      <td>{% if step.step_action == 'merge' %}{{ step.selected_labels|join('、') or '未配置' }}{% else %}{{ step.calculated_columns|length }} 个公式{% endif %}</td>
+                      <td>{% if step.step_action == 'merge' %}{{ step.selected_output_labels[:4]|join('、') }}{% if step.selected_output_labels|length > 4 %}等{% endif %}{% else %}{% for col in step.calculated_columns[:4] %}{{ col.name }}{% if not loop.last %}、{% endif %}{% else %}未配置{% endfor %}{% endif %}</td>
+                      <td><a class="button secondary" onclick="event.stopPropagation()" href="{{ url_for('rules', tab='flows', flow=flow_config.flow_key, selected_step=step.index, edit_step=step.index, period=selected_period) }}">编辑</a></td>
+                    </tr>
+                  {% else %}
+                    <tr><td colspan="9" class="muted">暂无步骤，请点击新增步骤。</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="flow-section">
+            <div class="flow-section-head">
+              <div class="flow-section-title">
+                <h2>步骤图解</h2>
+              </div>
+            </div>
+            <div class="step-diagram-wrap">
+              {% for step in flow_config.steps %}
+                <div class="diagram-step-card {% if step.index == active_step_index %}active{% endif %} {% if not loop.last and loop.index % 4 != 0 %}has-next{% endif %} {% if loop.index > 1 and loop.index % 4 == 1 %}wrap-start{% endif %}">
+                  <strong>步骤{{ step.index }}：{{ step.name }}</strong>
+                  <span>类型：{{ step.step_category_label }} / {{ step.step_action_label }}</span>
+                  <span>来源：{{ step.left_source_name }}</span>
+                  {% if step.step_action == 'merge' %}
+                    <span>配置表：{{ step.right_table_name }}</span>
+                    <span>匹配：{{ step.selected_labels|join('、') or '未配置' }}</span>
+                    <span>输出：{{ step.selected_output_labels[:4]|join('、') }}{% if step.selected_output_labels|length > 4 %}等{% endif %}</span>
+                  {% else %}
+                    <span>计算：{{ step.calculated_columns|length }} 个公式</span>
+                    <span>字段：{% for col in step.calculated_columns[:3] %}{{ col.name }}{% if not loop.last %}、{% endif %}{% else %}未配置{% endfor %}</span>
+                  {% endif %}
+                </div>
+              {% else %}
+                <p class="muted">暂无步骤，请先新增步骤。</p>
+              {% endfor %}
+            </div>
+          </section>
+
+          {% if edit_step_index %}
+            {% for step in flow_config.steps if step.index == edit_step_index %}
+              <div class="modal-backdrop">
+                <section class="modal" role="dialog" aria-modal="true" aria-labelledby="flow-step-modal-title">
+                  <div class="modal-head">
+                    <div>
+                      <h2 id="flow-step-modal-title">编辑步骤详情</h2>
+                      <p>按“新增字段”和“修改字段”两个维度维护当前步骤。</p>
+                    </div>
+                    <a class="button secondary" href="{{ url_for('rules', tab='flows', flow=flow_config.flow_key, selected_step=step.index, period=selected_period) }}">关闭</a>
+                  </div>
+                  <div class="modal-body">
+                    <input type="hidden" name="step_index" value="{{ step.index }}">
+                    <input type="hidden" name="return_edit_step" value="{{ step.index }}">
+                    <section class="step-logic-card">
+                      <div class="step-mode-grid">
+                        <div class="form-row" style="margin-top:0">
+                          <label>步骤类型</label>
+                          <select name="step_{{ step.index }}_category" onchange="this.form.submit()">
+                            <option value="add_field" {% if step.step_category == 'add_field' %}selected{% endif %}>新增字段</option>
+                            <option value="modify_field" {% if step.step_category == 'modify_field' %}selected{% endif %}>修改字段</option>
+                          </select>
+                        </div>
+                        <div class="form-row" style="margin-top:0">
+                          <label>处理方式</label>
+                          {% if step.step_category == 'modify_field' %}
+                            <input type="hidden" name="step_{{ step.index }}_action" value="calculate">
+                            <input type="text" value="计算" disabled>
+                          {% else %}
+                            <select name="step_{{ step.index }}_action" onchange="this.form.submit()">
+                              <option value="merge" {% if step.step_action == 'merge' %}selected{% endif %}>合并：表与表匹配</option>
+                              <option value="calculate" {% if step.step_action == 'calculate' %}selected{% endif %}>计算：字段公式</option>
+                            </select>
+                          {% endif %}
+                        </div>
+                      </div>
+                      <div class="form-row">
+                        <label>步骤名称</label>
+                        <input name="step_{{ step.index }}_name" type="text" value="{{ step.name }}">
+                      </div>
+                    </section>
+
+                    {% if step.step_action == 'merge' %}
+                      <section class="step-logic-card" style="margin-top:14px">
+                        <h2>表与表的匹配</h2>
+                        <div class="version-meta" style="margin-top:0">
+                          <div><strong>左侧数据源</strong><br>{{ step.left_source_name }}<br><span class="muted">{{ step.left_source_detail }}</span></div>
+                          <div><strong>右侧配置表</strong><br>{{ step.right_table_name }}<br><span class="muted">运行时选择具体配置表版本</span></div>
+                        </div>
+                        <div class="form-row">
+                          <label>配置表类型</label>
+                          <select name="step_{{ step.index }}_rule_table" onchange="this.form.submit()">
+                            {% for item in merge_config.rule_table_options %}
+                              <option value="{{ item.key }}" {% if item.key == step.right_table %}selected{% endif %}>{{ item.name }}</option>
+                            {% endfor %}
+                          </select>
+                        </div>
+                        <h2>匹配字段</h2>
+                        <p class="muted" style="margin-top:6px">{{ step.left_source_name }} 与当前配置表都存在的字段才会显示在这里。</p>
+                        <div class="checkbox-grid">
+                          {% for item in step.match_options %}
+                            <label class="check-item">
+                              <input type="checkbox" name="step_{{ step.index }}_match_fields" value="{{ item.field }}" {% if item.field in step.selected_fields %}checked{% endif %}>
+                              <span>{{ item.label }}</span>
+                            </label>
+                          {% else %}
+                            <span class="muted">当前配置表暂无可匹配字段。</span>
+                          {% endfor %}
+                        </div>
+                        <h2 style="margin-top:16px">输出字段</h2>
+                        <div class="checkbox-grid">
+                          {% for item in step.output_options %}
+                            <label class="check-item">
+                              <input type="checkbox" name="step_{{ step.index }}_output_fields" value="{{ item.field }}" {% if item.field in step.selected_output_fields %}checked{% endif %}>
+                              <span>{{ item.label }}</span>
+                            </label>
+                          {% else %}
+                            <span class="muted">当前配置表暂无可选择输出字段，请先上传配置表数据。</span>
+                          {% endfor %}
+                        </div>
+                      </section>
+                    {% else %}
+                      <section class="step-logic-card" style="margin-top:14px">
+                        <div class="button-row" style="margin-top:0; justify-content:space-between">
+                          <div>
+                            <h2 style="margin:0">{% if step.step_category == 'modify_field' %}修改字段计算{% else %}新增字段计算{% endif %}</h2>
+                            <p class="muted" style="margin:6px 0 0">{% if step.step_category == 'modify_field' %}用公式改写已有字段，后续会补齐格式和重命名能力。{% else %}用公式生成新的字段，后一行公式可以引用前面已生成字段。{% endif %}</p>
+                          </div>
+                          <button class="button secondary" id="add-step-calc-column" type="button">新增计算字段</button>
+                        </div>
+                        <div id="step-calc-column-list" class="calc-column-list">
+                          {% for col in step.calculated_columns %}
+                            <div class="calc-column-row">
+                              <input type="hidden" name="step_{{ step.index }}_calc_index" value="{{ col.index }}">
+                              <label class="check-item" style="min-height:38px"><input type="checkbox" name="step_{{ step.index }}_calc_{{ col.index }}_active" value="Y" {% if col.active %}checked{% endif %}><span>启用</span></label>
+                              <input name="step_{{ step.index }}_calc_{{ col.index }}_name" type="text" value="{{ col.name }}" placeholder="字段名称">
+                              <input name="step_{{ step.index }}_calc_{{ col.index }}_field" type="text" value="{{ col.field }}" placeholder="字段编码">
+                              <input name="step_{{ step.index }}_calc_{{ col.index }}_formula" type="text" value="{{ col.formula }}" placeholder="计算公式">
+                              <button class="button secondary remove-calc-column" type="button">删除</button>
+                            </div>
+                          {% else %}
+                            <p class="muted">暂无计算字段，请点击右上角新增。</p>
+                          {% endfor %}
+                        </div>
+                        <template id="step-calc-column-template">
+                          <div class="calc-column-row">
+                            <input type="hidden" name="step_{{ step.index }}_calc_index" value="__INDEX__">
+                            <label class="check-item" style="min-height:38px"><input type="checkbox" name="step_{{ step.index }}_calc___INDEX___active" value="Y" checked><span>启用</span></label>
+                            <input name="step_{{ step.index }}_calc___INDEX___name" type="text" placeholder="字段名称">
+                            <input name="step_{{ step.index }}_calc___INDEX___field" type="text" placeholder="字段编码">
+                            <input name="step_{{ step.index }}_calc___INDEX___formula" type="text" placeholder="计算公式，例如 num(delivery_qty) * 1.2">
+                            <button class="button secondary remove-calc-column" type="button">删除</button>
+                          </div>
+                        </template>
+                      </section>
+                    {% endif %}
+                  </div>
+                  <div class="modal-foot">
+                    <button class="button secondary" type="submit" formaction="{{ url_for('delete_merge_flow_step', flow_key=flow_config.flow_key, step_index=step.index, period=selected_period) }}" formmethod="post">删除步骤</button>
+                    <button type="submit">保存步骤</button>
+                  </div>
+                </section>
+              </div>
+              <script>
+                (() => {
+                  const list = document.getElementById('step-calc-column-list');
+                  const template = document.getElementById('step-calc-column-template');
+                  const addButton = document.getElementById('add-step-calc-column');
+                  let nextIndex = {{ (step.calculated_columns|length) + 1 }};
+                  const bindRemove = (root) => {
+                    root.querySelectorAll('.remove-calc-column').forEach((button) => {
+                      button.addEventListener('click', () => button.closest('.calc-column-row')?.remove());
+                    });
+                  };
+                  bindRemove(document);
+                  addButton?.addEventListener('click', () => {
+                    const html = template.innerHTML.replaceAll('__INDEX__', String(nextIndex));
+                    const wrapper = document.createElement('div');
+                    wrapper.innerHTML = html.trim();
+                    const row = wrapper.firstElementChild;
+                    list.appendChild(row);
+                    bindRemove(row);
+                    nextIndex += 1;
+                  });
+                })();
+              </script>
+            {% endfor %}
+          {% endif %}
         </form>
-        <script>
-          (() => {
-            const list = document.getElementById('calc-column-list');
-            const template = document.getElementById('calc-column-template');
-            const addButton = document.getElementById('add-calc-column');
-            let nextIndex = {{ (flow_config.calculated_columns|length) + 1 }};
-            const bindRemove = (root) => {
-              root.querySelectorAll('.remove-calc-column').forEach((button) => {
-                button.addEventListener('click', () => button.closest('.calc-column-row')?.remove());
-              });
-            };
-            bindRemove(document);
-            addButton?.addEventListener('click', () => {
-              const html = template.innerHTML.replaceAll('__INDEX__', String(nextIndex));
-              const wrapper = document.createElement('div');
-              wrapper.innerHTML = html.trim();
-              const row = wrapper.firstElementChild;
-              list.appendChild(row);
-              bindRemove(row);
-              nextIndex += 1;
-            });
-          })();
-        </script>
         {% else %}
           <section class="panel">
             <h2>暂无计算流程配置</h2>
