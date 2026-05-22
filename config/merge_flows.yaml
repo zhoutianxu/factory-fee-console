@@ -49,7 +49,21 @@ flows:
       keys:
       - left: yyyymm
         right: yyyymm
-      output_fields: []
+      output_fields:
+      - factory_code
+      - 一级部门
+      - 工厂
+      - 物料组
+      - material_code
+      - material_desc
+      - brand
+    - name: 新增步骤5
+      step_category: modify_field
+      step_action: calculate
+      left_table: previous_result
+      join_type: left
+      unmatched: mark_exception
+      calculated_columns: []
     priority_specs:
     - priority: 1
       keys:

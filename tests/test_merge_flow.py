@@ -284,6 +284,117 @@ flows:
     assert '"fee_amount_cny": 6.0' in raw_json
 
 
+def test_merge_flow_runs_calculation_step_before_later_merge(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    pd.DataFrame([{
+        "material_code": "MAT001",
+        "model": "M1",
+        "is_active": "Y",
+        "priority": "1",
+    }]).to_csv(cfg.input_files["table2_material_master"], index=False)
+
+    flow_config = tmp_path / "merge_flows.yaml"
+    flow_config.write_text(
+        """
+flows:
+  calc_then_merge:
+    name: "先计算再匹配"
+    steps:
+      - name: "生成匹配字段"
+        step_category: "add_field"
+        step_action: "calculate"
+        calculated_columns:
+          - field: "material_code_for_match"
+            name: "匹配物料编码"
+            formula: "text(material_code)"
+            active: "Y"
+      - name: "匹配物料"
+        step_category: "add_field"
+        step_action: "merge"
+        right_table: "table2_material_master"
+        keys:
+          - {left: "material_code_for_match", right: "material_code"}
+        output_fields: ["model"]
+""",
+        encoding="utf-8",
+    )
+
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        """
+        INSERT INTO raw_sap_monthly_data(
+            import_batch_id, raw_id, run_id, yyyymm, factory_code, material_code, delivery_qty
+        )
+        VALUES ('SAP_TEST', 1, '', '202502', 'F001', 'MAT001', 3)
+        """
+    )
+
+    summary = run_merge_flow(
+        conn,
+        cfg,
+        import_batch_id="SAP_TEST",
+        flow_key="calc_then_merge",
+        merge_run_id="MERGE_CALC_THEN_MERGE",
+        flow_config_path=flow_config,
+    )
+
+    raw_json = conn.execute(
+        "SELECT raw_json FROM merge_result WHERE merge_run_id = 'MERGE_CALC_THEN_MERGE'"
+    ).fetchone()[0]
+    assert summary["exception_rows"] == 0
+    assert '"material_code_for_match": "MAT001"' in raw_json
+    assert '"model": "M1"' in raw_json
+
+
+def test_merge_flow_runs_sql_calculation_step(tmp_path):
+    cfg = _make_cfg(tmp_path)
+    flow_config = tmp_path / "merge_flows.yaml"
+    flow_config.write_text(
+        """
+flows:
+  sql_calc:
+    name: "SQL计算"
+    steps:
+      - name: "SQL计算加工费"
+        step_category: "add_field"
+        step_action: "calculate"
+        calculated_columns:
+          - field: "fee_amount_cny"
+            name: "加工费CNY"
+            method: "sql"
+            formula: "delivery_qty * 2"
+            active: "Y"
+""",
+        encoding="utf-8",
+    )
+
+    conn = sqlite3.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        """
+        INSERT INTO raw_sap_monthly_data(
+            import_batch_id, raw_id, run_id, yyyymm, factory_code, material_code, delivery_qty
+        )
+        VALUES ('SAP_TEST', 1, '', '202502', 'F001', 'MAT001', 3)
+        """
+    )
+
+    run_merge_flow(
+        conn,
+        cfg,
+        import_batch_id="SAP_TEST",
+        flow_key="sql_calc",
+        merge_run_id="MERGE_SQL_CALC",
+        flow_config_path=flow_config,
+    )
+
+    raw_json = conn.execute(
+        "SELECT raw_json FROM merge_result WHERE merge_run_id = 'MERGE_SQL_CALC'"
+    ).fetchone()[0]
+    assert '"fee_amount_cny": 6' in raw_json
+
+
 def _make_cfg(tmp_path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"

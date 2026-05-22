@@ -95,6 +95,7 @@ def run_merge_flow(
     sap = _load_sap_batch(conn, import_batch_id, row_limit=row_limit)
     steps = _flow_steps(flow, flow_key, cfg)
     calculated_columns = _flow_calculated_columns(flow)
+    has_calculation_steps = any(_step_action(step) == "calculate" for step in steps)
     label_map = _formula_label_map()
 
     results: list[dict[str, Any]] = []
@@ -112,7 +113,14 @@ def run_merge_flow(
         last_rule_id = None
 
         for step_index, step in enumerate(steps, start=1):
-            if str(step.get("step_action", step.get("operation", "merge"))) != "merge":
+            action = _step_action(step)
+            if action == "calculate":
+                columns = _step_calculated_columns(step)
+                merged[f"step{step_index}_name"] = step.get("name", f"步骤{step_index}")
+                merged[f"step{step_index}_match_status"] = "CALCULATED"
+                merged = evaluate_calculated_columns(merged, columns, label_map=label_map)
+                continue
+            if action != "merge":
                 continue
             rule_table_key = str(step.get("right_table", ""))
             rules = _load_rule_table(cfg, rule_table_key, (config_versions or {}).get(rule_table_key))
@@ -168,7 +176,8 @@ def run_merge_flow(
         merged["hit_priority_material"] = last_priority
         merged["hit_rule_id_material"] = last_rule_id
         merged["merge_exception_reason"] = ";".join(step_exception_codes)
-        merged = evaluate_calculated_columns(merged, calculated_columns, label_map=label_map)
+        if not has_calculation_steps:
+            merged = evaluate_calculated_columns(merged, calculated_columns, label_map=label_map)
 
         results.append(merged)
         db_results.append({
@@ -338,6 +347,15 @@ def _step_priority_specs(step: dict[str, Any]) -> list[tuple[int, list[tuple[str
     if not pairs:
         raise ValueError(f"Merge step has no keys: {step.get('name', '')}")
     return [(1, pairs)]
+
+
+def _step_action(step: dict[str, Any]) -> str:
+    action = str(step.get("step_action", step.get("operation", "merge"))).strip().lower()
+    return action if action in {"merge", "calculate"} else "merge"
+
+
+def _step_calculated_columns(step: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in step.get("calculated_columns", [])]
 
 
 def _flow_calculated_columns(flow: dict[str, Any]) -> list[dict[str, Any]]:

@@ -298,7 +298,7 @@ run:
     assert (tmp_path / copied_version["file"]).exists()
 
 
-def test_settings_page_is_paused_and_redirects_to_dashboard(tmp_path):
+def test_settings_page_redirects_to_period_management(tmp_path):
     config_dir = tmp_path / "config"
     input_dir = tmp_path / "data" / "input"
     config_dir.mkdir()
@@ -325,7 +325,7 @@ run:
     response = app.test_client().get("/settings?period=202502")
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/")
+    assert response.headers["Location"].endswith("/periods")
 
 
 def test_can_move_and_delete_rule_table_type(tmp_path):

@@ -27,3 +27,31 @@ def test_formula_supports_chinese_bracket_references():
     result = evaluate_formula("[交货数量] * 2", {"delivery_qty": 5}, label_map={"交货数量": "delivery_qty"})
 
     assert result == 10
+
+
+def test_calculated_columns_support_sql_expression_mode():
+    record = {"delivery_qty": 5, "unit_fee_local": 3, "currency_code": "USD", "exchange_rate": 7}
+    columns = [{
+        "field": "fee_amount_cny",
+        "method": "sql",
+        "formula": "CASE WHEN currency_code = 'CNY' THEN delivery_qty * unit_fee_local ELSE delivery_qty * unit_fee_local * exchange_rate END",
+        "active": "Y",
+    }]
+
+    out = evaluate_calculated_columns(record, columns)
+
+    assert out["fee_amount_cny"] == 105
+
+
+def test_sql_expression_supports_chinese_bracket_references():
+    record = {"delivery_qty": 5, "unit_fee_local": 3}
+    columns = [{
+        "field": "fee_amount",
+        "method": "sql",
+        "formula": "[交货数量] * [单价]",
+        "active": "Y",
+    }]
+
+    out = evaluate_calculated_columns(record, columns, label_map={"交货数量": "delivery_qty", "单价": "unit_fee_local"})
+
+    assert out["fee_amount"] == 15

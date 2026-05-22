@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from typing import Any
 
 
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BRACKET_REF_RE = re.compile(r"\[([^\]]+)\]")
+UNSAFE_SQL_RE = re.compile(
+    r";|--|/\*|\*/|\b(attach|alter|create|delete|detach|drop|insert|pragma|replace|update|vacuum)\b",
+    re.IGNORECASE,
+)
 
 
 def evaluate_calculated_columns(record: dict[str, Any], columns: list[dict[str, Any]], label_map: dict[str, str] | None = None) -> dict[str, Any]:
@@ -17,7 +22,11 @@ def evaluate_calculated_columns(record: dict[str, Any], columns: list[dict[str, 
         formula = str(column.get("formula", "")).strip()
         if not field or not formula:
             continue
-        out[field] = evaluate_formula(formula, out, label_map=label_map)
+        method = str(column.get("method", column.get("mode", "formula"))).strip().lower()
+        if method in {"sql", "sql_expr", "sql_expression"}:
+            out[field] = evaluate_sql_expression(formula, out, label_map=label_map)
+        else:
+            out[field] = evaluate_formula(formula, out, label_map=label_map)
     return out
 
 
@@ -48,6 +57,33 @@ def evaluate_formula(formula: str, record: dict[str, Any], label_map: dict[str, 
         return eval(expr, {"__builtins__": {}}, env)
     except Exception:
         return ""
+
+
+def evaluate_sql_expression(expression: str, record: dict[str, Any], label_map: dict[str, str] | None = None) -> Any:
+    expr = str(expression or "").strip()
+    if not expr or UNSAFE_SQL_RE.search(expr):
+        return ""
+    expr = BRACKET_REF_RE.sub(lambda m: _sql_identifier((label_map or {}).get(m.group(1), m.group(1))), expr)
+    params: dict[str, Any] = {}
+    columns = []
+    for index, (key, value) in enumerate(record.items(), start=1):
+        key = str(key)
+        if not IDENT_RE.match(key):
+            continue
+        param = f"p{index}"
+        params[param] = value
+        columns.append(f":{param} AS {_sql_identifier(key)}")
+    row_sql = ", ".join(columns) if columns else "1 AS _empty"
+    sql = f"WITH row AS (SELECT {row_sql}) SELECT {expr} AS value FROM row"
+    try:
+        with sqlite3.connect(":memory:") as conn:
+            return conn.execute(sql, params).fetchone()[0]
+    except Exception:
+        return ""
+
+
+def _sql_identifier(value: object) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
 
 
 def _is_active(column: dict[str, Any]) -> bool:

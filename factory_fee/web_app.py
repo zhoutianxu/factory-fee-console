@@ -234,7 +234,21 @@ def create_app(config_path: str | Path) -> Flask:
 
     @app.get("/settings")
     def settings() -> Response:
-        return redirect(url_for("index"))
+        return redirect(url_for("periods_page"))
+
+    @app.get("/periods")
+    def periods_page() -> str:
+        cfg = _cfg(app)
+        period_id = _selected_period_id(cfg)
+        return render_template_string(
+            BASE_TEMPLATE,
+            page="periods",
+            cfg=replace(cfg, yyyymm=period_id),
+            rule_tables=_rule_tables(cfg),
+            periods=_periods(cfg),
+            selected_period=period_id,
+            period_context=_period_management_context(cfg, period_id),
+        )
 
     @app.post("/run")
     def run() -> Response:
@@ -1004,7 +1018,7 @@ def create_app(config_path: str | Path) -> Flask:
             conn.close()
         _ensure_period_rule_files(cfg, period_id)
         flash(f"期间已创建：{period_id}。", "success")
-        return redirect(url_for("settings", period=period_id))
+        return redirect(url_for("periods_page", period=period_id))
 
     @app.post("/periods/<period_id>/<action>")
     def update_period_status(period_id: str, action: str) -> Response:
@@ -1189,6 +1203,15 @@ def _config_versions_label(cfg: AppConfig, raw_json: str) -> str:
     return "；".join(labels)
 
 
+def _config_versions_count_label(raw_json: str) -> str:
+    try:
+        mapping = json.loads(raw_json or "{}")
+    except json.JSONDecodeError:
+        mapping = {}
+    count = len([value for value in mapping.values() if value])
+    return f"{count} 个版本" if count else "未记录"
+
+
 def _config_version_file_path(cfg: AppConfig, table_key: str, version_id: str) -> Path:
     for version in _config_table_versions(cfg, table_key):
         if str(version.get("version_id")) == str(version_id):
@@ -1304,6 +1327,76 @@ def _periods(cfg: AppConfig) -> list[dict[str, Any]]:
     return rows
 
 
+def _period_management_context(cfg: AppConfig, selected_period: str) -> dict[str, Any]:
+    selected_period = normalize_yyyymm(selected_period)
+    periods = _periods(cfg)
+    current = next((row for row in periods if str(row.get("period_id")) == selected_period), None)
+    if not current:
+        current = {"period_id": selected_period, "status": "DRAFT", "status_label": "草稿", "created_at": "", "closed_at": "", "archived_at": "", "message": ""}
+
+    latest_sap: dict[str, dict[str, Any]] = {}
+    latest_merge: dict[str, dict[str, Any]] = {}
+    conn = _connect_for_read(cfg)
+    try:
+        sap_rows = pd.read_sql_query(
+            """
+            SELECT COALESCE(period_id, yyyymm) AS period_id, import_batch_id, source_file_name, import_rows, imported_at
+            FROM sap_import_batch
+            WHERE COALESCE(period_id, yyyymm) <> ''
+            ORDER BY imported_at DESC
+            """,
+            conn,
+        ).to_dict("records")
+        for row in sap_rows:
+            latest_sap.setdefault(str(row.get("period_id")), row)
+
+        merge_rows = pd.read_sql_query(
+            """
+            SELECT COALESCE(period_id, '') AS period_id, merge_run_id, flow_name, merged_rows, exception_rows, status, finished_at, started_at
+            FROM merge_run_log
+            WHERE COALESCE(period_id, '') <> ''
+            ORDER BY COALESCE(finished_at, started_at) DESC
+            """,
+            conn,
+        ).to_dict("records")
+        for row in merge_rows:
+            latest_merge.setdefault(str(row.get("period_id")), _localize_status_fields(row))
+    finally:
+        conn.close()
+
+    latest_export: dict[str, dict[str, Any]] = {}
+    for row in _export_history(cfg):
+        period_id = normalize_yyyymm(str(row.get("period") or ""))
+        if period_id:
+            latest_export.setdefault(period_id, row)
+
+    rows = []
+    for period in periods:
+        period_id = str(period.get("period_id"))
+        sap = latest_sap.get(period_id, {})
+        merge = latest_merge.get(period_id, {})
+        export = latest_export.get(period_id, {})
+        rows.append({
+            **period,
+            "fact_batch_label": sap.get("import_batch_id") or "未导入",
+            "fact_file_label": sap.get("source_file_name") or "",
+            "latest_task_label": merge.get("merge_run_id") or "无",
+            "latest_task_status": merge.get("status_label") or "",
+            "latest_export_label": export.get("export_id") or "无",
+            "note": period.get("message") or "",
+            "is_current": period_id == selected_period,
+        })
+
+    return {
+        "current": current,
+        "rows": rows,
+        "current_sap": latest_sap.get(selected_period, {}),
+        "current_merge": latest_merge.get(selected_period, {}),
+        "current_export": latest_export.get(selected_period, {}),
+        "is_locked": str(current.get("status")) in {"CLOSED", "ARCHIVED"},
+    }
+
+
 def _ensure_period(conn: sqlite3.Connection, period_id: str) -> None:
     init_db(conn)
     period_id = normalize_yyyymm(period_id)
@@ -1328,7 +1421,7 @@ def _period_status(cfg: AppConfig, period_id: str) -> str:
 
 
 def _is_period_locked(cfg: AppConfig, period_id: str) -> bool:
-    return False
+    return _period_status(cfg, period_id) in {"CLOSED", "ARCHIVED"}
 
 
 def _ensure_period_rule_files(cfg: AppConfig, period_id: str) -> None:
@@ -1372,7 +1465,12 @@ def _dashboard_summary(cfg: AppConfig) -> dict[str, Any]:
             "sap_rows": _count(conn, "raw_sap_monthly_data", period_id=cfg.yyyymm),
             "sap_batches": _count(conn, "sap_import_batch", period_id=cfg.yyyymm),
         }
-        merge_runs = _recent_merge_runs(conn, limit=5, period_id=cfg.yyyymm)
+        merge_runs = [
+            row for row in _recent_merge_runs(conn, limit=10, period_id=cfg.yyyymm)
+            if str(row.get("status") or "") != "RUNNING"
+        ][:5]
+        for row in merge_runs:
+            row["config_versions_summary"] = _config_versions_count_label(str(row.get("config_versions_json") or "{}"))
     finally:
         conn.close()
     return {"runs": runs, "merge_runs": merge_runs, "counts": counts}
@@ -2199,6 +2297,8 @@ def _calculated_columns_from_config(columns: Any) -> list[dict[str, Any]]:
             "field": str(column.get("field", "")),
             "name": str(column.get("name", "")),
             "formula": str(column.get("formula", "")),
+            "method": _normalize_calc_method(column.get("method", column.get("mode", "formula"))),
+            "method_label": "SQL表达式" if _normalize_calc_method(column.get("method", column.get("mode", "formula"))) == "sql" else "公式",
             "active": str(column.get("active", "Y")).upper() in {"Y", "YES", "TRUE", "1", "是"},
         })
     return out
@@ -2217,6 +2317,7 @@ def _calculated_columns_from_form(form: Any, prefix: str = "calc") -> list[dict[
             "field": field,
             "name": name or _display_column_label(field),
             "formula": formula,
+            "method": _normalize_calc_method(form.get(f"{prefix}_{index}_method", "formula")),
             "active": "Y" if form.get(f"{prefix}_{index}_active") == "Y" else "N",
         })
     return columns
@@ -2230,6 +2331,11 @@ def _normalize_step_category(value: object) -> str:
 def _normalize_step_action(value: object) -> str:
     text = str(value or "").strip()
     return text if text in {"merge", "calculate"} else "merge"
+
+
+def _normalize_calc_method(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return "sql" if text in {"sql", "sql_expr", "sql_expression"} else "formula"
 
 
 def _default_downstream_steps() -> list[dict[str, Any]]:
@@ -2918,7 +3024,7 @@ BASE_TEMPLATE = """
     .modal-summary { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 22px; }
     .summary-chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--muted); background: #fbfbfb; }
     .modal-table { height: 100%; max-height: none; }
-    .modal .calc-column-row { grid-template-columns: 110px minmax(130px, 180px) minmax(150px, 220px) minmax(260px, 1fr) auto; }
+    .modal .calc-column-row { grid-template-columns: 100px minmax(120px, 160px) minmax(140px, 200px) minmax(120px, 150px) minmax(260px, 1fr) auto; }
     .step-tabs { display: flex; gap: 8px; color: var(--muted); font-weight: 700; margin: 12px 0; }
     .step-tabs span { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: #f8f9f9; }
     .step-tabs span.active { color: var(--ink); border-color: var(--ink); background: #fff; }
@@ -2929,7 +3035,7 @@ BASE_TEMPLATE = """
     .calc-column-list { display: grid; gap: 10px; margin-top: 12px; }
     .calc-column-row {
       display: grid;
-      grid-template-columns: 92px minmax(120px, 180px) minmax(150px, 220px) minmax(320px, 1fr) auto;
+      grid-template-columns: 92px minmax(120px, 180px) minmax(150px, 220px) minmax(120px, 150px) minmax(320px, 1fr) auto;
       gap: 10px;
       align-items: center;
     }
@@ -2977,6 +3083,7 @@ BASE_TEMPLATE = """
     <div class="header-inner">
       <div class="brand">工厂加工费计算系统<small>本系统借助Codex编写而成，如需帮助，请联系周天旭 13631554910</small></div>
       <nav>
+        <a class="{{ 'active' if page == 'periods' else '' }}" href="{{ url_for('periods_page', period=selected_period or cfg.yyyymm) }}">期间管理</a>
         <a class="{{ 'active' if page == 'sap' else '' }}" href="{{ url_for('sap_data', period=selected_period or cfg.yyyymm) }}">1 事实表管理</a>
         <a class="{{ 'active' if page == 'rules' and rules_tab == 'tables' else '' }}" href="{{ url_for('config_tables', period=selected_period or cfg.yyyymm) }}">2 配置表管理</a>
         <a class="{{ 'active' if page == 'rules' and rules_tab == 'flows' else '' }}" href="{{ url_for('flows', period=selected_period or cfg.yyyymm) }}">3 计算流程设置</a>
@@ -2995,45 +3102,85 @@ BASE_TEMPLATE = """
       {% endfor %}
     {% endwith %}
 
-    {% if page == 'settings' %}
-      <h1>基础配置</h1>
-      <p>集中管理期间。业务页面只消费当前期间，不再把期间操作散落到每个页面。</p>
+    {% if page == 'periods' %}
+      <h1>期间管理</h1>
+      <p>使用说明：财务期间是月度计算工作的容器。先选择当前期间，再进入后续页面导入数据、执行计算和导出结果。</p>
       <section class="panel" style="margin-top:0">
-        <h2>期间管理</h2>
-        <div class="button-row" style="margin-top:0">
-        <form method="get" action="" class="inline-form">
+        <h2>当前期间</h2>
+        <p class="muted">当前系统所有业务页面默认跟随这个期间。封存或归档后，只允许查看、下载和追溯。</p>
+        <form method="get" action="{{ url_for('periods_page') }}" class="form-row">
           <label for="period_picker">期间</label>
-          <select id="period_picker" name="period" style="max-width:220px" onchange="this.form.submit()">
+          <select id="period_picker" name="period" onchange="this.form.submit()">
             {% for p in periods %}
               <option value="{{ p.period_id }}" {% if p.period_id == selected_period %}selected{% endif %}>{{ p.period_id }}｜{{ p.status_label }}</option>
             {% endfor %}
           </select>
-          {% for p in periods if p.period_id == selected_period %}
-            <span class="muted">当前状态：{{ p.status_label }}</span>
-          {% endfor %}
         </form>
-        <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='complete', period=selected_period) }}"><button class="button secondary" type="submit">标记完成</button></form>
-        <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='close', period=selected_period) }}"><button class="button secondary" type="submit">封存期间</button></form>
-        <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='archive', period=selected_period) }}"><button class="button secondary" type="submit">归档期间</button></form>
-        <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='reopen', period=selected_period) }}"><button class="button secondary" type="submit">重新打开</button></form>
-        <form id="new-period" method="post" action="{{ url_for('create_period') }}" class="inline-form">
-          <input id="new_period_id" name="period_id" type="text" placeholder="新增期间，例如 202506" style="max-width:220px">
-          <button type="submit">创建期间</button>
-        </form>
+        <div class="grid">
+          <div class="metric"><span class="muted">当前状态</span><strong>{{ period_context.current.status_label }}</strong></div>
+          <div class="metric"><span class="muted">本期事实表</span><strong style="font-size:18px">{{ period_context.current_sap.import_batch_id or '未导入' }}</strong></div>
+          <div class="metric"><span class="muted">最近计算任务</span><strong style="font-size:18px">{{ period_context.current_merge.merge_run_id or '无' }}</strong></div>
+          <div class="metric"><span class="muted">最近导出版本</span><strong style="font-size:18px">{{ period_context.current_export.export_id or '无' }}</strong></div>
         </div>
+        <div class="button-row">
+          <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='complete', period=selected_period) }}"><button class="button secondary" type="submit">标记完成</button></form>
+          <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='close', period=selected_period) }}"><button class="button secondary" type="submit">封存期间</button></form>
+          <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='reopen', period=selected_period) }}"><button class="button secondary" type="submit">重新打开</button></form>
+          <form class="inline-form" method="post" action="{{ url_for('update_period_status', period_id=selected_period, action='archive', period=selected_period) }}"><button class="button secondary" type="submit">归档期间</button></form>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>新增期间</h2>
+        <p class="muted">创建新的财务期间，建议使用 YYYYMM 格式，例如 202506。</p>
+        <form id="new-period" method="post" action="{{ url_for('create_period') }}" class="form-row">
+          <label for="new_period_id">新增期间</label>
+          <div class="button-row" style="margin-top:0">
+            <input id="new_period_id" name="period_id" type="text" placeholder="例如 202506" style="max-width:260px">
+            <button type="submit">创建期间</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>期间列表</h2>
+        <p class="muted">展示所有财务期间及其关键数据。点击“切换”后，后续页面默认进入该期间。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>期间</th><th>状态</th><th>事实表批次</th><th>最近计算任务</th><th>最近导出版本</th><th>创建时间</th><th>封存时间</th><th>说明</th><th>操作</th></tr></thead>
+            <tbody>
+              {% for row in period_context.rows %}
+                <tr>
+                  <td>{{ row.period_id }}</td>
+                  <td>{{ row.status_label }}</td>
+                  <td>{{ row.fact_batch_label }}</td>
+                  <td>{{ row.latest_task_label }}</td>
+                  <td>{{ row.latest_export_label }}</td>
+                  <td>{{ row.created_at }}</td>
+                  <td>{{ row.closed_at or row.archived_at or '-' }}</td>
+                  <td>{{ row.note or '-' }}</td>
+                  <td>
+                    {% if row.is_current %}
+                      <span class="muted">当前</span>
+                    {% else %}
+                      <a class="button secondary" href="{{ url_for('periods_page', period=row.period_id) }}">切换</a>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% else %}
+                <tr><td colspan="9" class="muted">暂无期间</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">规则：事实表、计算结果、加工费导出强绑定期间；配置表版本和计算流程可跨期间复用。</p>
       </section>
     {% endif %}
 
     {% if page == 'dashboard' %}
       <h1>执行计算</h1>
-      <p>选择期间SAP事实表、计算流程，并为每个步骤选择配置表版本。</p>
-      <div class="grid">
-        <div class="metric"><span class="muted">计算结果行</span><strong>{{ summary.counts.calc_result }}</strong></div>
-        <div class="metric"><span class="muted">异常日志行</span><strong>{{ summary.counts.calc_exception }}</strong></div>
-        <div class="metric"><span class="muted">合并结果行</span><strong>{{ summary.counts.merge_result }}</strong></div>
-      </div>
+      <p>使用说明：选择事实表批次、计算流程和配置表版本，确认后发起计算。完成后在下方任务列表中查看结果。</p>
       <section class="panel">
-        <h2>计算任务中心</h2>
+        <h2>发起计算</h2>
+        <p class="muted">把一个事实表批次，按选定流程和配置版本执行完整计算。</p>
         <form method="post" action="{{ url_for('run') }}">
           <input type="hidden" name="period_id" value="{{ selected_period or cfg.yyyymm }}">
           <div class="form-row" style="display:none">
@@ -3069,49 +3216,34 @@ BASE_TEMPLATE = """
               </select>
             </div>
           {% endfor %}
-          <div class="summary-list">
-            <h2>本次计算清单</h2>
-            <div class="summary-item"><strong>期间事实表</strong><p>{{ selected_period }}｜{% if execution_summary.default_batch %}默认批次 {{ execution_summary.default_batch.import_batch_id }}{% else %}请先到事实表管理导入SAP数据{% endif %}</p></div>
-            <div class="summary-item"><strong>计算流程</strong><p>{{ execution_config.name }}</p></div>
-            {% for step in execution_config.steps %}
-              <div class="summary-item"><strong>{{ step.name }}</strong><p>{{ step.rule_table_name }}｜默认选择：{% if step.versions %}{{ step.versions[0].name }}{% else %}暂无版本{% endif %}</p></div>
-            {% endfor %}
-          </div>
+          <p class="muted">本次运行将生成完整计算结果，并保留事实表批次、流程、配置表版本的追溯信息。</p>
           <div class="actions">
             <button type="submit">开始计算</button>
-            <a class="button secondary" href="{{ url_for('sap_data', period=selected_period) }}">事实表管理</a>
-            <a class="button secondary" href="{{ url_for('config_tables', period=selected_period) }}">维护配置表版本</a>
+            <a class="button secondary" href="{{ url_for('index', period=selected_period, flow=selected_flow_key) }}">清空</a>
           </div>
         </form>
       </section>
       <section class="panel">
-        <h2>最近合并</h2>
+        <h2>已完成计算任务列表</h2>
+        <p class="muted">这里统一展示最近完成的计算任务。点击“查看结果”后，跳转到计算结果页面查看明细、异常和回溯信息。</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>合并运行ID</th><th>流程</th><th>SAP导入批次</th><th>输入行数</th><th>输出行数</th><th>异常行数</th><th>状态</th><th>开始时间</th><th>完成时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>计算任务ID</th><th>事实表批次</th><th>计算流程</th><th>结果行数</th><th>异常行数</th><th>状态</th><th>完成时间</th><th>配置版本摘要</th><th>操作</th></tr></thead>
             <tbody>
               {% for row in summary.merge_runs %}
                 <tr>
-                  <td>{{ row.merge_run_id }}</td><td>{{ row.flow_name }}</td><td>{{ row.import_batch_id }}</td><td>{{ row.left_rows }}</td><td>{{ row.merged_rows }}</td><td>{{ row.exception_rows }}</td><td>{{ row.status_label }}</td><td>{{ row.started_at }}</td><td>{{ row.finished_at }}</td>
-                  <td><a href="{{ url_for('merge_run_detail', merge_run_id=row.merge_run_id) }}">查看</a></td>
+                  <td>{{ row.merge_run_id }}</td>
+                  <td>{{ row.import_batch_id }}</td>
+                  <td>{{ row.flow_name }}</td>
+                  <td>{{ row.merged_rows }}</td>
+                  <td>{{ row.exception_rows }}</td>
+                  <td>{{ row.status_label }}</td>
+                  <td>{{ row.finished_at }}</td>
+                  <td>{{ row.config_versions_summary }}</td>
+                  <td><a class="button secondary" href="{{ url_for('results', period=selected_period, merge_run_id=row.merge_run_id) }}">查看结果</a></td>
                 </tr>
               {% else %}
-                <tr><td colspan="10" class="muted">暂无合并记录</td></tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </section>
-      <section class="panel">
-        <h2>最近运行</h2>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>计算运行ID</th><th>SAP导入批次</th><th>SAP 文件</th><th>SAP 行数</th><th>结果行数</th><th>异常行数</th><th>年月</th><th>工厂</th><th>状态</th><th>开始时间</th><th>完成时间</th></tr></thead>
-            <tbody>
-              {% for row in summary.runs %}
-                <tr><td>{{ row.run_id }}</td><td>{{ row.import_batch_id }}</td><td>{{ row.sap_file_name }}</td><td>{{ row.sap_import_rows }}</td><td>{{ row.calc_result_rows }}</td><td>{{ row.calc_exception_rows }}</td><td>{{ row.yyyymm }}</td><td>{{ row.factory_scope }}</td><td>{{ row.status_label }}</td><td>{{ row.started_at }}</td><td>{{ row.finished_at }}</td></tr>
-              {% else %}
-                <tr><td colspan="11" class="muted">暂无运行记录</td></tr>
+                <tr><td colspan="9" class="muted">暂无已完成计算任务</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -3436,6 +3568,7 @@ BASE_TEMPLATE = """
                 <input type="hidden" name="step_{{ step.index }}_calc_index" value="{{ col.index }}">
                 <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_name" value="{{ col.name }}">
                 <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_field" value="{{ col.field }}">
+                <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_method" value="{{ col.method }}">
                 <input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_formula" value="{{ col.formula }}">
                 {% if col.active %}<input type="hidden" name="step_{{ step.index }}_calc_{{ col.index }}_active" value="Y">{% endif %}
               {% endfor %}
@@ -3605,6 +3738,10 @@ BASE_TEMPLATE = """
                               <label class="check-item" style="min-height:38px"><input type="checkbox" name="step_{{ step.index }}_calc_{{ col.index }}_active" value="Y" {% if col.active %}checked{% endif %}><span>启用</span></label>
                               <input name="step_{{ step.index }}_calc_{{ col.index }}_name" type="text" value="{{ col.name }}" placeholder="字段名称">
                               <input name="step_{{ step.index }}_calc_{{ col.index }}_field" type="text" value="{{ col.field }}" placeholder="字段编码">
+                              <select name="step_{{ step.index }}_calc_{{ col.index }}_method" aria-label="计算方式">
+                                <option value="formula" {% if col.method == 'formula' %}selected{% endif %}>公式</option>
+                                <option value="sql" {% if col.method == 'sql' %}selected{% endif %}>SQL表达式</option>
+                              </select>
                               <input name="step_{{ step.index }}_calc_{{ col.index }}_formula" type="text" value="{{ col.formula }}" placeholder="计算公式">
                               <button class="button secondary remove-calc-column" type="button">删除</button>
                             </div>
@@ -3618,6 +3755,10 @@ BASE_TEMPLATE = """
                             <label class="check-item" style="min-height:38px"><input type="checkbox" name="step_{{ step.index }}_calc___INDEX___active" value="Y" checked><span>启用</span></label>
                             <input name="step_{{ step.index }}_calc___INDEX___name" type="text" placeholder="字段名称">
                             <input name="step_{{ step.index }}_calc___INDEX___field" type="text" placeholder="字段编码">
+                            <select name="step_{{ step.index }}_calc___INDEX___method" aria-label="计算方式">
+                              <option value="formula" selected>公式</option>
+                              <option value="sql">SQL表达式</option>
+                            </select>
                             <input name="step_{{ step.index }}_calc___INDEX___formula" type="text" placeholder="计算公式，例如 num(delivery_qty) * 1.2">
                             <button class="button secondary remove-calc-column" type="button">删除</button>
                           </div>
@@ -3856,7 +3997,6 @@ BASE_TEMPLATE = """
           </div>
           <div class="actions">
             <button type="submit">查看结果</button>
-            <a class="button secondary" href="{{ url_for('rules', tab='flows') }}">运行匹配流程</a>
             {% if selected_run_id %}
               <button class="button secondary" type="submit" form="delete-current-result">删除当前结果</button>
             {% endif %}
@@ -4001,81 +4141,178 @@ BASE_TEMPLATE = """
         </div>
       </section>
     {% elif page == 'help' %}
-      <h1>使用指引与Q&A</h1>
-      <p>按顶部菜单从左到右完成日常操作：先准备数据和规则，再执行计算，最后生成面向业务用户的加工费导出。</p>
+      <h1>使用指引</h1>
+      <p>本系统用于把上游事实数据、配置表版本和计算流程组合起来，生成可追溯的加工费计算结果，并输出面向业务用户的结果表。</p>
       <section class="panel">
-        <h2>1.0 推荐操作流程</h2>
+        <h2>推荐操作流程</h2>
         <div class="grid">
-          <div class="metric"><span class="muted">第一步</span><strong>事实表管理</strong><p>上传表1 SAP流水，系统生成 SAP 导入批次，并保留原始明细。</p></div>
-          <div class="metric"><span class="muted">第二步</span><strong>配置表管理</strong><p>维护表2、表3、表4、表5以及新增配置表类型；每张表可以保留多个版本。</p></div>
-          <div class="metric"><span class="muted">第三步</span><strong>计算流程设置</strong><p>用流程图定义串型匹配步骤：选择配置表类型、匹配字段、输出字段。</p></div>
-          <div class="metric"><span class="muted">第四步</span><strong>执行计算</strong><p>选择 SAP 批次、计算流程，并为每个步骤选择配置表版本后运行。</p></div>
-          <div class="metric"><span class="muted">第五步</span><strong>计算结果</strong><p>查看完整回溯明细、异常信息和每一步命中情况。</p></div>
-          <div class="metric"><span class="muted">第六步</span><strong>加工费导出</strong><p>勾选给业务用户看的字段，生成可留存、可下载的加工费导出版本。</p></div>
+          <div class="metric"><span class="muted">准备</span><strong>期间管理</strong><p>创建或切换当前财务期间。后续页面默认跟随当前期间。</p></div>
+          <div class="metric"><span class="muted">第一步</span><strong>事实表管理</strong><p>上传上游系统数据，如 SAP、决算系统数据。系统生成导入批次，并保留原始明细。</p></div>
+          <div class="metric"><span class="muted">第二步</span><strong>配置表管理</strong><p>创建配置表类型，再导入主数据、系数表、单价表等配置版本。</p></div>
+          <div class="metric"><span class="muted">第三步</span><strong>计算流程设置</strong><p>维护流程步骤。一个步骤只做一件事：合并新增字段、计算新增字段，或计算修改字段。</p></div>
+          <div class="metric"><span class="muted">第四步</span><strong>执行计算</strong><p>选择事实表批次、计算流程和各步骤配置表版本，点击开始计算。</p></div>
+          <div class="metric"><span class="muted">第五步</span><strong>计算结果</strong><p>查看完整回溯结果、异常信息、配置版本来源和每一步命中情况。</p></div>
+          <div class="metric"><span class="muted">第六步</span><strong>加工费导出</strong><p>勾选业务用户需要的字段，生成可留存、可下载的加工费导出版本。</p></div>
         </div>
       </section>
       <section class="panel">
-        <h2>页面怎么用</h2>
+        <h2>页面说明</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>页面</th><th>主要用途</th><th>注意事项</th></tr></thead>
+            <thead><tr><th>页面</th><th>主要用途</th><th>怎么使用</th><th>注意事项</th></tr></thead>
             <tbody>
-              <tr><td>1 事实表管理</td><td>导入 SAP 流水，查看导入批次和数据预览。</td><td>导入前不做强字段校验，字段会尽量按原始表头保留。</td></tr>
-              <tr><td>2 配置表管理</td><td>管理配置表类型和配置表版本，上传、启停、删除、下载版本。</td><td>新增字段允许保留在后续列；页面展示优先使用中文字段名。</td></tr>
-              <tr><td>3 计算流程设置</td><td>维护可视化匹配流程，流程只绑定配置表类型，不绑定具体版本。</td><td>新增步骤统一通过流程图里的“新增节点”完成。</td></tr>
-              <tr><td>4 执行计算</td><td>选择 SAP 批次、流程和各步骤版本，正式生成计算结果。</td><td>运行前检查“本次计算清单”，确认版本组合正确。</td></tr>
-              <tr><td>5 计算结果</td><td>查看回溯明细、异常和配置版本来源。</td><td>这里是完整追溯表，字段较多，适合排查和复核。</td></tr>
-              <tr><td>6 加工费导出</td><td>勾选字段，生成面向业务用户的结果表。</td><td>导出预览会随字段勾选同步变化；历史导出会留存。</td></tr>
-              <tr><td>日志</td><td>查看导入、计算、合并、异常等历史记录。</td><td>适合追溯某次运行是否成功，以及下载历史结果文件。</td></tr>
+              <tr><td>期间管理</td><td>管理财务期间，作为月度计算工作的顶层容器。</td><td>创建、切换、完成、封存、重新打开期间。</td><td>封存或归档期间只允许查看、下载和追溯。</td></tr>
+              <tr><td>1 事实表管理</td><td>导入事实数据，管理已导入批次。</td><td>选择文件后导入；在列表中可预览、下载、删除。</td><td>导入时不强制字段校验，系统尽量保留原始表头。</td></tr>
+              <tr><td>2 配置表管理</td><td>管理参与计算和匹配的配置表。</td><td>先新增配置表类型，再在该类型下新增配置表版本。</td><td>明细数据通过弹窗查看；删除版本只影响当前版本。</td></tr>
+              <tr><td>3 计算流程设置</td><td>定义计算流程和步骤顺序。</td><td>选择流程，在步骤管理中新增、编辑、上移、下移、删除步骤。</td><td>流程只绑定配置表类型；正式运行时再选择具体版本。</td></tr>
+              <tr><td>4 执行计算</td><td>发起正式计算任务。</td><td>选择事实表批次、流程和各步骤版本，点击开始计算。</td><td>页面下方的已完成任务可直接跳转到计算结果。</td></tr>
+              <tr><td>5 计算结果</td><td>查看完整计算明细和异常。</td><td>选择结果批次后查看结果；可删除当前结果。</td><td>这里是回溯表，字段较多，不建议直接作为业务交付表。</td></tr>
+              <tr><td>6 加工费导出</td><td>生成面向业务用户的结果表。</td><td>勾选需要展示的字段，预览同步变化后生成导出版本。</td><td>历史导出会保留，可按批次回看和下载。</td></tr>
+              <tr><td>日志</td><td>查看系统运行记录。</td><td>用于追溯导入、计算、合并、异常和下载文件。</td><td>适合排查某次运行是否成功。</td></tr>
             </tbody>
           </table>
         </div>
       </section>
       <section class="panel">
-        <h2>数据与规则</h2>
+        <h2>核心概念</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>问题</th><th>回答</th></tr></thead>
+            <thead><tr><th>概念</th><th>含义</th><th>例子</th></tr></thead>
             <tbody>
-              <tr><td>SAP事实表和配置表有什么区别？</td><td>SAP事实表是每次计算的业务流水；配置表是主数据、系数、单价、损益规则等可复用版本。</td></tr>
-              <tr><td>匹配流程是串型的吗？</td><td>是。表1先匹配表2，表2带出的机型、工厂物料组等字段可以继续参与表3、表4、表5匹配。</td></tr>
-              <tr><td>匹配字段从哪里来？</td><td>系统会根据上一步结果和当前配置表版本自动识别可匹配字段，只展示两边都存在的字段。</td></tr>
-              <tr><td>输出字段从哪里来？</td><td>输出字段来自当前配置表中未作为匹配字段的字段，目的是把规则表里的业务属性带入结果。</td></tr>
-              <tr><td>为什么某张表有数据但匹配不到？</td><td>常见原因是匹配字段值不一致、版本选错、字段表头不一致、空值、是否启用或优先级不符合当前流程。</td></tr>
-              <tr><td>规则表允许新增字段吗？</td><td>允许。标准字段会排在前面，额外字段会保留在后续列。</td></tr>
-              <tr><td>页面字段为什么都是中文？</td><td>系统展示层会把内部字段名转换成中文；后续可以扩展成中英文双语。</td></tr>
-              <tr><td>删除配置表版本会删除什么？</td><td>删除的是当前选中的配置表版本文件和版本记录，不会删除其他版本。</td></tr>
+              <tr><td>事实表</td><td>每次计算的业务流水数据，通常来自上游系统。</td><td>SAP 月度加工费流水、决算系统数据。</td></tr>
+              <tr><td>配置表类型</td><td>一类可复用配置表的定义。</td><td>物料主数据、难度系数表、单台加工费表、损益交货量表。</td></tr>
+              <tr><td>配置表版本</td><td>某个配置表类型下的一份具体数据。</td><td>物料主数据 v_20260518_175940。</td></tr>
+              <tr><td>计算流程</td><td>由多个步骤组成的计算方案。</td><td>标准流程1：先匹配物料主数据，再计算字段，再匹配系数表。</td></tr>
+              <tr><td>步骤</td><td>流程中的一个动作。一个步骤只做一件事。</td><td>新增字段 / 合并，新增字段 / 计算，修改字段 / 计算。</td></tr>
+              <tr><td>计算结果</td><td>系统运行后生成的完整明细，包含业务字段、命中状态和异常原因。</td><td>用于复核和追溯。</td></tr>
+              <tr><td>加工费导出</td><td>从计算结果中挑选字段后生成的业务交付表。</td><td>用于汇报、传阅和归档。</td></tr>
             </tbody>
           </table>
         </div>
       </section>
       <section class="panel">
-        <h2>结果与导出</h2>
+        <h2>配置表与流程设置</h2>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>问题</th><th>回答</th></tr></thead>
+            <thead><tr><th>问题</th><th>说明</th></tr></thead>
             <tbody>
-              <tr><td>计算结果在哪里看？</td><td>进入“5 计算结果”，选择合并运行批次，即可直接在页面查看，不需要先下载。</td></tr>
-              <tr><td>为什么计算结果表很宽？</td><td>计算结果是回溯表，会保留规则字段、命中状态、异常原因等信息。给业务用户看的版本建议从“6 加工费导出”生成。</td></tr>
-              <tr><td>加工费导出和计算结果有什么区别？</td><td>计算结果用于复核和追溯；加工费导出用于交付，可以只勾选用户需要看的字段。</td></tr>
-              <tr><td>导出字段能调整吗？</td><td>可以。勾选字段后，导出预览会立即同步，生成导出版本时使用当前勾选字段。</td></tr>
-              <tr><td>导出历史会保留吗？</td><td>会。系统会记录导出ID、归属年月、计算结果批次、字段数、行数、生成时间和文件。</td></tr>
-              <tr><td>删除SAP批次会影响什么？</td><td>会同步删除该批次的原始SAP行、相关合并结果、异常和计算记录。</td></tr>
-              <tr><td>默认匹配流程能删除吗？</td><td>可以。删除全部历史流程后，计算流程设置页会显示空状态，并保留新增流程入口。</td></tr>
+              <tr><td>配置表字段从哪里来？</td><td>来自上传的配置表版本。系统会读取表头，并在页面中优先展示中文字段名。</td></tr>
+              <tr><td>匹配字段怎么出现？</td><td>选择配置表类型后，系统只展示左侧数据源和当前配置表都存在的字段。</td></tr>
+              <tr><td>输出字段怎么出现？</td><td>输出字段来自当前配置表中未作为匹配字段的字段，用于把配置表中的业务属性带入结果。</td></tr>
+              <tr><td>第一步可以匹配什么？</td><td>第一步左侧数据源是事实表，用事实表字段去匹配配置表字段。</td></tr>
+              <tr><td>后续步骤可以匹配什么？</td><td>后续步骤左侧数据源是上一步结果，因此可以使用前面步骤已经带出的字段继续匹配。</td></tr>
+              <tr><td>为什么某张表匹配不到？</td><td>常见原因是字段值不一致、配置表版本选错、字段表头不同、字段为空、流程步骤顺序不对。</td></tr>
+              <tr><td>配置表允许新增字段吗？</td><td>允许。系统会保留上传表格中的额外字段，匹配和输出时按当前版本字段识别。</td></tr>
+              <tr><td>删除配置表类型或版本要注意什么？</td><td>删除后会影响后续运行时的可选项；已经生成的历史结果仍可用于追溯。</td></tr>
             </tbody>
           </table>
         </div>
       </section>
       <section class="panel">
-        <h2>上线使用说明</h2>
+        <h2>步骤类型怎么选</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>步骤类型</th><th>处理方式</th><th>适合场景</th><th>例子</th></tr></thead>
+            <tbody>
+              <tr><td>新增字段</td><td>合并：表与表匹配</td><td>把配置表中的字段带入当前结果。</td><td>根据物料编码匹配物料描述、品牌、机型。</td></tr>
+              <tr><td>新增字段</td><td>计算：字段公式</td><td>根据已有字段生成新的业务指标。</td><td>加工费CNY = 损益交货量 * 单台加工费CNY。</td></tr>
+              <tr><td>修改字段</td><td>计算：字段公式</td><td>对已有字段做名称、口径或数值调整。</td><td>把空值改成 0，或把本币金额换算成 CNY。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">建议：每个步骤只做一件事。需要先合并再计算时，请拆成两个步骤，这样更容易复核，也更接近 PowerQuery 的操作习惯。</p>
+      </section>
+      <section class="panel">
+        <h2>执行计算与查看结果</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>动作</th><th>说明</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr><td>发起计算</td><td>在“4 执行计算”中选择事实表批次、计算流程和各步骤配置表版本。</td><td>生成一条计算任务，并自动跳转到计算结果页面。</td></tr>
+              <tr><td>查看已完成任务</td><td>执行计算页下方展示已完成计算任务列表。</td><td>点击“查看结果”进入对应结果批次。</td></tr>
+              <tr><td>查看计算结果</td><td>在“5 计算结果”中查看完整结果明细和异常明细。</td><td>用于复核匹配是否命中、字段是否正确、异常原因是什么。</td></tr>
+              <tr><td>删除当前结果</td><td>在计算结果页删除当前选中的结果批次。</td><td>删除该批次结果和异常记录，请谨慎使用。</td></tr>
+              <tr><td>生成加工费导出</td><td>在“6 加工费导出”中勾选字段并生成导出版本。</td><td>生成更适合业务查看和下载的结果表。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>计算字段：公式与SQL表达式</h2>
+        <p>在计算步骤中，可以新增或修改字段。建议优先使用“公式”，门槛更低；遇到复杂条件判断时，再使用“SQL表达式”。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方式</th><th>适合场景</th><th>填写规则</th><th>示例</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>公式</td>
+                <td>常规四则运算、金额、数量、系数、简单条件判断。</td>
+                <td>直接引用字段编码；中文字段名可写成 [字段名]。后一行公式可以引用前面已生成的新字段。</td>
+                <td><code>num(delivery_qty) * num(unit_fee_cny)</code></td>
+              </tr>
+              <tr>
+                <td>SQL表达式</td>
+                <td>复杂条件判断，例如 CASE WHEN、IN、COALESCE。</td>
+                <td>只填写一个表达式，不写 SELECT、UPDATE、DELETE，也不要加分号。</td>
+                <td><code>CASE WHEN currency_code = 'CNY' THEN unit_fee_local ELSE unit_fee_local * exchange_rate END</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>公式常用写法</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>写法</th><th>含义</th><th>示例</th></tr></thead>
+            <tbody>
+              <tr><td><code>num(字段)</code></td><td>把字段转成数字，空值或异常值按 0 处理。</td><td><code>num(delivery_qty)</code></td></tr>
+              <tr><td><code>num(字段, 默认值)</code></td><td>把字段转成数字，并指定空值时的默认值。</td><td><code>num(pnl_delivery_coef, 1)</code></td></tr>
+              <tr><td><code>text(字段)</code></td><td>把字段转成文本。</td><td><code>text(currency_code)</code></td></tr>
+              <tr><td><code>if_eq(字段, "值", 真值, 假值)</code></td><td>字段等于某个值时返回真值，否则返回假值。</td><td><code>if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local) * num(exchange_rate))</code></td></tr>
+              <tr><td><code>if_in(字段, "值1,值2", 真值, 假值)</code></td><td>字段属于多个值之一时返回真值，否则返回假值。</td><td><code>if_in(include_pnl_delivery, "是,Y,YES,1,TRUE", num(delivery_qty), 0)</code></td></tr>
+              <tr><td><code>round(数值, 位数)</code></td><td>保留指定小数位。</td><td><code>round(num(fee_amount_cny), 2)</code></td></tr>
+              <tr><td><code>coalesce(a, b)</code></td><td>优先取第一个有值的数据。</td><td><code>coalesce(model, material_model)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>常见计算示例</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>业务含义</th><th>推荐写法</th></tr></thead>
+            <tbody>
+              <tr><td>损益交货量</td><td><code>if_in(include_pnl_delivery, "是,Y,YES,1,TRUE", num(delivery_qty) * num(pnl_delivery_coef, 1), 0)</code></td></tr>
+              <tr><td>单台加工费CNY</td><td><code>if_eq(currency_code, "CNY", num(unit_fee_local), num(unit_fee_local) * num(exchange_rate))</code></td></tr>
+              <tr><td>加工费CNY</td><td><code>num(pnl_delivery_qty) * num(unit_fee_cny)</code></td></tr>
+              <tr><td>标准工时</td><td><code>num(std_hour_coef) * num(delivery_qty)</code></td></tr>
+              <tr><td>综合难度</td><td><code>num(difficulty_coef) * num(delivery_qty)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>SQL表达式示例</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>业务含义</th><th>SQL表达式</th></tr></thead>
+            <tbody>
+              <tr><td>币种换算</td><td><code>CASE WHEN currency_code = 'CNY' THEN unit_fee_local ELSE unit_fee_local * exchange_rate END</code></td></tr>
+              <tr><td>空值兜底</td><td><code>COALESCE(unit_fee_cny, 0) * COALESCE(delivery_qty, 0)</code></td></tr>
+              <tr><td>中文字段名引用</td><td><code>CASE WHEN [是否计入损益交货量] IN ('是','Y') THEN [交货数量] ELSE 0 END</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">提示：公式和SQL表达式都只用于当前行计算，不用于跨行汇总。字段编码比中文名称更稳定；如果使用中文字段名，请用方括号包起来，例如 <code>[交货数量]</code>。</p>
+      </section>
+      <section class="panel">
+        <h2>常见问题</h2>
         <div class="table-wrap">
           <table>
             <thead><tr><th>问题</th><th>回答</th></tr></thead>
             <tbody>
-              <tr><td>当前本地版适合什么场景？</td><td>适合单机使用、现场演示、规则验证和小范围试运行。数据保存在本机 SQLite 和文件目录中。</td></tr>
-              <tr><td>多人在线使用需要补什么？</td><td>需要登录权限、云端数据库、文件对象存储、备份恢复、操作审计和并发控制。</td></tr>
-              <tr><td>Netlify可以做什么？</td><td>Netlify适合承载网页前端、公开访问入口和轻量接口。完整生产化需要把当前本地存储迁移到云端存储或外部数据库。</td></tr>
-              <tr><td>为什么不能只把本地Flask直接放上去？</td><td>当前系统依赖本地 SQLite 和本地文件写入；Netlify的无服务器运行环境不适合直接承载这种长期可写的本地状态。</td></tr>
+              <tr><td>为什么页面字段尽量显示中文？</td><td>系统展示层会把内部字段名转换成中文，并尽量保留导入表格中的原始中文表头。</td></tr>
+              <tr><td>计算结果和加工费导出有什么区别？</td><td>计算结果用于复核和追溯，字段多；加工费导出用于交付，字段可勾选。</td></tr>
+              <tr><td>导出预览会随字段选择变化吗？</td><td>会。勾选或取消字段后，导出预览会同步变化。</td></tr>
+              <tr><td>删除 SAP 批次会影响什么？</td><td>会同步删除该批次的原始行、相关计算结果、异常和运行记录。</td></tr>
+              <tr><td>默认流程可以删除吗？</td><td>可以。删除后可重新新增流程并配置步骤。</td></tr>
+              <tr><td>本地版适合什么场景？</td><td>适合单机使用、现场演示、规则验证和小范围试运行。数据保存在本机 SQLite 和文件目录中。</td></tr>
+              <tr><td>未来部署到服务器需要补什么？</td><td>需要登录权限、数据备份、访问控制、Nginx/HTTPS、安全组收口和更完整的操作审计。</td></tr>
             </tbody>
           </table>
         </div>
